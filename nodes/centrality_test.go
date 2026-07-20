@@ -487,3 +487,48 @@ func TestCentralityBetweennessStaysFastOnTiedWeights(t *testing.T) {
 	}
 	t.Logf("betweenness over %d uniform-weight edges: %v", len(edges), elapsed.Round(time.Millisecond))
 }
+
+// TestCentralityRejectsZeroWeightForDistanceRatios is the regression guard for
+// an INVERTED RANKING. closeness and harmonic divide BY the distance, so a
+// zero-weight edge puts a distinct vertex at distance 0 and the true value is
+// infinite. The package clamps non-finite scores to 0 — correct for a vertex
+// with no reachable peers, but catastrophic here, because it made the MOST
+// central vertices score identically to isolated ones. On a—b (weight 0),
+// b—c (weight 5), harmonic returned a:0, b:0, c:0.4 — exactly backwards.
+func TestCentralityRejectsZeroWeightForDistanceRatios(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+
+	zero := &gen.Graph{
+		Nodes: []*gen.GraphNode{{Id: "a"}, {Id: "b"}, {Id: "c"}},
+		Edges: []*gen.GraphEdge{
+			{From: "a", To: "b", Weight: 0, ExplicitZeroWeight: true},
+			{From: "b", To: "c", Weight: 5},
+		},
+	}
+	for _, m := range []string{"closeness", "harmonic"} {
+		got, err := nodes.Centrality(ctx, ax, &gen.CentralityRequest{Graph: zero, Measure: m})
+		if err != nil {
+			t.Fatalf("%s: unexpected Go error: %v", m, err)
+		}
+		if got.Error == "" {
+			t.Errorf("%s must reject a zero-weight edge rather than clamp an infinite score to 0; got %+v", m, got.Scores)
+		}
+	}
+
+	// The measures that never divide by a distance must still work.
+	for _, m := range []string{"degree", "betweenness", "eccentricity"} {
+		got, err := nodes.Centrality(ctx, ax, &gen.CentralityRequest{Graph: zero, Measure: m})
+		if err != nil || got.Error != "" {
+			t.Errorf("%s does not divide by a distance and must still accept zero weights: err=%v nodeErr=%s", m, err, got.Error)
+		}
+	}
+
+	// And a graph with no zero-weight edge must be unaffected.
+	ok := mkGraph(false, []string{"a", "b", "c"}, [][3]any{{"a", "b", 1}, {"b", "c", 5}})
+	for _, m := range []string{"closeness", "harmonic"} {
+		got, err := nodes.Centrality(ctx, ax, &gen.CentralityRequest{Graph: ok, Measure: m})
+		if err != nil || got.Error != "" {
+			t.Errorf("%s on an ordinary weighted graph: err=%v nodeErr=%s", m, err, got.Error)
+		}
+	}
+}

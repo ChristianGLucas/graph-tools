@@ -62,19 +62,14 @@ func PageRank(ctx context.Context, ax axiom.Context, input *gen.PageRankRequest)
 		return &gen.PageRankResult{Error: "cancelled before computing PageRank: " + err.Error()}, nil
 	}
 
-	// The tolerance is pinned rather than caller-supplied: gonum seeds the
-	// power iteration with a random vector, so the converged result varies
-	// within the tolerance. Rounding to 6 decimal places afterwards puts the
-	// rounding granularity far above the residual noise, so the emitted scores
-	// are reproducible.
-	//
-	// 1e-12, not 1e-14: on a PERIODIC graph (a directed ring, say) the residual
-	// oscillates and plateaus near the float64 noise floor, so a 1e-14 target
-	// may never be met. 1e-12 is still six orders of magnitude finer than the
-	// 6-decimal rounding applied below.
-	//
-	// The L1 residual is compared against this directly in deterministicPageRank.
-	const pageRankTolerance = 1e-13 // per vertex; see deterministicPageRank
+	// The convergence tolerance is pinned rather than caller-supplied, so a
+	// caller cannot drive the iteration count. It is a PER-VERTEX target:
+	// deterministicPageRank compares the L1 residual against tol*n, because an
+	// L1 sum over n vertices has a noise floor that grows with n and a
+	// size-independent target is unreachable on large graphs. At the 20000
+	// vertex cap the resulting worst-case error per score is about 2e-7, which
+	// stays under the 6-decimal rounding applied below.
+	const pageRankTolerance = 1e-13
 	const pageRankDecimals = 6
 
 	// deterministicPageRank, not gonum's network.PageRank/PageRankSparse: gonum

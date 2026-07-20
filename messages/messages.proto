@@ -165,10 +165,13 @@ message CentralityRequest {
   //                    hop-count topology; edge weights are ignored here.
   //   "closeness"    — reciprocal of the summed distance FROM every vertex
   //                    that can reach it (the standard incoming convention).
+  //                    Rejects graphs containing a zero-weight edge, since a
+  //                    distinct vertex at distance 0 makes the value infinite.
   //   "eccentricity" — distance to the farthest vertex the vertex can REACH
   //                    (the outgoing convention).
   //   "harmonic"     — sum of the reciprocal distances FROM every vertex that
-  //                    can reach it (the standard incoming convention).
+  //                    can reach it (the standard incoming convention). Also
+  //                    rejects zero-weight edges, for the same reason.
   // Defaults to "degree" when empty. Any other value is rejected.
   //
   // Every measure except "degree" needs an all-pairs shortest-path

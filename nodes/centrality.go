@@ -22,10 +22,13 @@ import (
 //	                 (hop counts); edge weights are ignored for this measure.
 //	"closeness"    — the reciprocal of the summed distance FROM every vertex
 //	                 that can reach it (the standard incoming convention).
+//	                 Rejects graphs with zero-weight edges, which would put a
+//	                 distinct vertex at distance 0 and make the value infinite.
 //	"eccentricity" — the distance to the farthest vertex this vertex can REACH
 //	                 (the outgoing convention).
 //	"harmonic"     — the sum of reciprocal distances FROM every vertex that can
-//	                 reach it (the standard incoming convention).
+//	                 reach it (the standard incoming convention). Rejects
+//	                 zero-weight edges, for the same reason as closeness.
 //
 // Defaults to "degree". Every measure except "degree" needs an all-pairs
 // shortest-path computation and therefore rejects negative edge weights and
@@ -74,6 +77,16 @@ func Centrality(ctx context.Context, ax axiom.Context, input *gen.CentralityRequ
 		}
 		if b.hasNeg {
 			return &gen.CentralityResult{Error: measure + " centrality requires non-negative edge weights"}, nil
+		}
+		// closeness and harmonic divide BY the distance, so a zero-weight edge
+		// puts a distinct vertex at distance 0 and the true value is infinite.
+		// Reporting that as 0 (the clamp used for a vertex with no reachable
+		// peers) would INVERT the ranking — the most central vertex would score
+		// like an isolated one — so reject rather than guess. The other
+		// measures never divide by a distance and are unaffected.
+		if b.hasZero && (measure == "closeness" || measure == "harmonic") {
+			return &gen.CentralityResult{Error: measure +
+				" centrality is undefined when an edge has zero weight, because a distinct vertex then sits at distance 0; remove the zero-weight edges or use a different measure"}, nil
 		}
 		if err := ctx.Err(); err != nil {
 			return &gen.CentralityResult{Error: "cancelled before computing " + measure + ": " + err.Error()}, nil

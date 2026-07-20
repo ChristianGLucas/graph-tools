@@ -600,3 +600,103 @@ func TestPageRankConvergesOnLongChain(t *testing.T) {
 		t.Errorf("scores sum to %v, want 1 within %v", sum, tolSum)
 	}
 }
+
+// TestPageRankSatisfiesTheFixedPointEquation gates NUMERICAL ACCURACY, which
+// the sum-to-1 assertions do not: the recurrence conserves total mass exactly
+// at every iteration (sum of next = (1-d) + d*1 = 1), so "scores sum to 1"
+// holds from the very first step regardless of whether it converged. It is
+// vacuous as a convergence gate — loosening the tolerance a millionfold left
+// the whole suite green while deployed scores moved by 1.1e-5.
+//
+// This checks the definition directly instead: PageRank is the vector r
+// satisfying r = (1-d)/n + d*(M r), so the residual of the returned scores
+// under one application of that map must be tiny. Run on LARGE ASYMMETRIC
+// graphs, where convergence is slowest and error largest.
+func TestPageRankSatisfiesTheFixedPointEquation(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+
+	shapes := map[string]*gen.Graph{
+		// A long chain: the slowest-converging shape at high damping.
+		"chain300": func() *gen.Graph {
+			g := &gen.Graph{Directed: true}
+			for i := 0; i < 300; i++ {
+				g.Nodes = append(g.Nodes, &gen.GraphNode{Id: "n" + itoa(i)})
+			}
+			for i := 0; i+1 < 300; i++ {
+				g.Edges = append(g.Edges, &gen.GraphEdge{From: "n" + itoa(i), To: "n" + itoa(i+1)})
+			}
+			return g
+		}(),
+		// An in-star: every spoke points at the hub, maximally asymmetric.
+		"star_in200": func() *gen.Graph {
+			g := &gen.Graph{Directed: true}
+			for i := 0; i < 200; i++ {
+				g.Nodes = append(g.Nodes, &gen.GraphNode{Id: "n" + itoa(i)})
+			}
+			for i := 1; i < 200; i++ {
+				g.Edges = append(g.Edges, &gen.GraphEdge{From: "n" + itoa(i), To: "n0"})
+			}
+			return g
+		}(),
+	}
+
+	for name, g := range shapes {
+		for _, d := range []float64{0.85, 0.99} {
+			got, err := nodes.PageRank(ctx, ax, &gen.PageRankRequest{Graph: g, Damping: d})
+			if err != nil || got.Error != "" {
+				t.Fatalf("%s d=%v: err=%v nodeErr=%s", name, d, err, got.Error)
+			}
+
+			// Rebuild the map independently from the raw input message.
+			r := map[string]float64{}
+			for _, s := range got.Scores {
+				r[s.Node] = s.Score
+			}
+			outDeg := map[string]int{}
+			for _, e := range g.Edges {
+				outDeg[e.From]++
+			}
+			n := float64(len(g.Nodes))
+
+			var dangling float64
+			for _, node := range g.Nodes {
+				if outDeg[node.Id] == 0 {
+					dangling += r[node.Id]
+				}
+			}
+			next := map[string]float64{}
+			base := (1-d)/n + d*dangling/n
+			for _, node := range g.Nodes {
+				next[node.Id] = base
+			}
+			for _, e := range g.Edges {
+				next[e.To] += d * r[e.From] / float64(outDeg[e.From])
+			}
+
+			// The allowance must be per-vertex and IN-DEGREE-AWARE. Each score
+			// is rounded to 6 decimals, so every in-edge feeds up to 5e-7 of
+			// rounding error into its target: a hub with 199 in-edges inherits
+			// ~1e-4 of pure rounding noise that has nothing to do with
+			// convergence. A flat threshold would either mask a real failure on
+			// the chain or fire spuriously on the star.
+			inDeg := map[string]int{}
+			for _, e := range g.Edges {
+				inDeg[e.To]++
+			}
+			const roundStep = 5e-7
+			worstRatio, worstNode, worstDiff := 0.0, "", 0.0
+			for _, node := range g.Nodes {
+				diff := math.Abs(next[node.Id] - r[node.Id])
+				allow := 3 * roundStep * (1 + d*float64(inDeg[node.Id]))
+				if ratio := diff / allow; ratio > worstRatio {
+					worstRatio, worstNode, worstDiff = ratio, node.Id, diff
+				}
+			}
+			if worstRatio > 1 {
+				t.Errorf("%s d=%v: vertex %s has fixed-point residual %.3g, %.1fx its rounding allowance — the scores have not converged",
+					name, d, worstNode, worstDiff, worstRatio)
+			}
+			t.Logf("%s d=%v: worst residual %.3g at %s (%.2f of allowance)", name, d, worstDiff, worstNode, worstRatio)
+		}
+	}
+}

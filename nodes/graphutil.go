@@ -101,6 +101,7 @@ type built struct {
 	edgeCount   int     // total edges in the input, including self-loops
 	hasNeg      bool    // true when any resolved edge weight is negative
 	weighted    bool    // true when any resolved edge weight differs from 1
+	hasZero     bool    // true when any resolved edge weight is exactly 0
 
 	// wdg/wug hold the non-self-loop edges with their weights. Exactly one is
 	// non-nil, matching `directed`.
@@ -250,6 +251,9 @@ func buildGraph(g *graphInput) (*built, error) {
 		b.totalWeight += w
 		if w != 1 {
 			b.weighted = true
+		}
+		if w == 0 {
+			b.hasZero = true
 		}
 
 		key := pair{fromID, toID}

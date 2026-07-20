@@ -1,5 +1,5 @@
 name: christiangeorgelucas/graph-tools
-version: 0.7.0
+version: 0.8.0
 language: go
 description: Composable graph-algorithm nodes — shortest path, distances, topological sort, connected components, minimum spanning tree, centrality, PageRank, cycle detection, structural stats and induced subgraphs — over a single canonical Graph envelope, wrapping the BSD-3-Clause gonum/graph library. Every node is stateless, deterministic for a given input, and rejects malformed graphs with a structured error rather than guessing.
 author: Christian George Lucas
