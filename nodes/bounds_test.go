@@ -786,3 +786,155 @@ func TestLargeDiameterGraphsStayBounded(t *testing.T) {
 	}
 	t.Logf("DetectCycle on a %d-vertex broom: %v -> witness %v", n, elapsed.Round(time.Millisecond), c.Cycle)
 }
+
+// TestDistancesTiedShapesStayLinear is the regression guard for a bound that
+// was calibrated for DISTINCT distances. Resolving farthest-first and memoising
+// removed the O(V*diameter) path reconstruction only when every vertex had its
+// own distance; make the distances TIE and the ordering degenerates and the
+// quadratic returns. A 20000-vertex zero-weight chain cost 3.8s and churned
+// 14 GB; a chain with many leaves hanging off its deep end cost 2.2s. The
+// hop-count walk is now a BFS over the shortest-path DAG, which is O(V+E) and
+// sensitive to neither diameter nor tie structure.
+func TestDistancesTiedShapesStayLinear(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+
+	cases := map[string]func() *gen.Graph{
+		// Every edge explicitly zero, so ALL vertices tie at distance 0.
+		"zero-weight chain": func() *gen.Graph {
+			g := &gen.Graph{Directed: true}
+			for i := 0; i < 20000; i++ {
+				g.Nodes = append(g.Nodes, &gen.GraphNode{Id: "n" + itoa(i)})
+			}
+			for i := 0; i+1 < 20000; i++ {
+				g.Edges = append(g.Edges, &gen.GraphEdge{
+					From: "n" + itoa(i), To: "n" + itoa(i+1),
+					Weight: 0, ExplicitZeroWeight: true,
+				})
+			}
+			return g
+		},
+		// A 10000-long chain with 10000 leaves on its deep end: thousands of
+		// vertices tie at the maximum distance.
+		"broom": func() *gen.Graph {
+			g := &gen.Graph{Directed: true}
+			for i := 0; i < 20000; i++ {
+				g.Nodes = append(g.Nodes, &gen.GraphNode{Id: "n" + itoa(i)})
+			}
+			for i := 0; i+1 < 10000; i++ {
+				g.Edges = append(g.Edges, &gen.GraphEdge{From: "n" + itoa(i), To: "n" + itoa(i+1)})
+			}
+			for i := 10000; i < 20000; i++ {
+				g.Edges = append(g.Edges, &gen.GraphEdge{From: "n9999", To: "n" + itoa(i)})
+			}
+			return g
+		},
+		// Uniform weights across a wide mesh: maximal ties everywhere.
+		"uniform mesh": func() *gen.Graph {
+			g := &gen.Graph{Directed: false}
+			const n = 3000
+			for i := 0; i < n; i++ {
+				g.Nodes = append(g.Nodes, &gen.GraphNode{Id: "n" + itoa(i)})
+			}
+			seen := map[[2]int]bool{}
+			for s := 1; len(g.Edges) < 30000 && s < n; s++ {
+				for i := 0; i < n && len(g.Edges) < 30000; i++ {
+					j := (i + s) % n
+					if i >= j || seen[[2]int{i, j}] {
+						continue
+					}
+					seen[[2]int{i, j}] = true
+					g.Edges = append(g.Edges, &gen.GraphEdge{From: "n" + itoa(i), To: "n" + itoa(j)})
+				}
+			}
+			return g
+		},
+	}
+
+	for name, mk := range cases {
+		t.Run(name, func(t *testing.T) {
+			g := mk()
+			start := time.Now()
+			got, err := nodes.Distances(ctx, ax, &gen.DistancesRequest{Graph: g, From: "n0"})
+			elapsed := time.Since(start)
+			if err != nil {
+				t.Fatalf("unexpected Go error: %v", err)
+			}
+			if got.Error != "" {
+				t.Fatalf("unexpected node error: %s", got.Error)
+			}
+			if elapsed > 10*time.Second {
+				t.Errorf("%s took %v — the quadratic hop-count reconstruction is back", name, elapsed)
+			}
+			t.Logf("%s (%d vertices, %d edges): %v", name, len(g.Nodes), len(g.Edges), elapsed.Round(time.Millisecond))
+		})
+	}
+}
+
+// TestDistancesHopCountsWithTiesAreCorrect guards the CORRECTNESS of the DAG
+// walk on exactly the shapes that broke the previous approach — a fast wrong
+// answer would be worse than a slow right one.
+func TestDistancesHopCountsWithTiesAreCorrect(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+
+	// Zero-weight chain: every vertex is at distance 0 but i hops away.
+	g := &gen.Graph{Directed: true}
+	const n = 200
+	for i := 0; i < n; i++ {
+		g.Nodes = append(g.Nodes, &gen.GraphNode{Id: "n" + itoa(i)})
+	}
+	for i := 0; i+1 < n; i++ {
+		g.Edges = append(g.Edges, &gen.GraphEdge{
+			From: "n" + itoa(i), To: "n" + itoa(i+1), Weight: 0, ExplicitZeroWeight: true,
+		})
+	}
+	got, err := nodes.Distances(ctx, ax, &gen.DistancesRequest{Graph: g, From: "n0"})
+	if err != nil || got.Error != "" {
+		t.Fatalf("err=%v nodeErr=%s", err, got.Error)
+	}
+	if len(got.Distances) != n {
+		t.Fatalf("got %d distances, want %d", len(got.Distances), n)
+	}
+	for _, d := range got.Distances {
+		want, _ := parseIndex(d.Node)
+		if d.Weight != 0 {
+			t.Errorf("%s: weight = %v, want 0 (every edge is an explicit zero)", d.Node, d.Weight)
+		}
+		if int(d.HopCount) != want {
+			t.Errorf("%s: hop_count = %d, want %d", d.Node, d.HopCount, want)
+		}
+	}
+
+	// Equal-cost alternatives: the hop count must be the MINIMUM over the
+	// shortest paths, not whichever one the search happened to store.
+	//   a -> b -> c -> d  (three hops, weight 3)
+	//   a ------> d       (one hop,   weight 3)
+	tie := mkGraph(true, []string{"a", "b", "c", "d"}, [][3]any{
+		{"a", "b", 1}, {"b", "c", 1}, {"c", "d", 1}, {"a", "d", 3},
+	})
+	got2, err := nodes.Distances(ctx, ax, &gen.DistancesRequest{Graph: tie, From: "a"})
+	if err != nil || got2.Error != "" {
+		t.Fatalf("err=%v nodeErr=%s", err, got2.Error)
+	}
+	for _, d := range got2.Distances {
+		if d.Node == "d" {
+			if d.Weight != 3 {
+				t.Errorf("d: weight = %v, want 3", d.Weight)
+			}
+			if d.HopCount != 1 {
+				t.Errorf("d: hop_count = %d, want 1 (the direct edge ties on weight but is shorter)", d.HopCount)
+			}
+		}
+	}
+}
+
+func parseIndex(id string) (int, bool) {
+	n := 0
+	for i := 1; i < len(id); i++ {
+		c := id[i]
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, true
+}

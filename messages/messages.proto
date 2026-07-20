@@ -102,7 +102,8 @@ message Distance {
   string node = 1;
   // The total shortest-path cost from the source to this vertex.
   double weight = 2;
-  // The number of edges on that shortest path.
+  // The fewest edges among the shortest paths to this vertex. When several
+  // paths tie on weight, this is the hop count of the shortest of them.
   int32 hop_count = 3;
 }
 
@@ -305,4 +306,16 @@ message SubgraphRequest {
   // The vertex ids to keep. Every id must exist in the graph; an unknown id is
   // rejected rather than ignored. An empty list yields an empty graph.
   repeated string nodes = 2;
+}
+
+// A request to reinterpret a graph's edge direction.
+message OrientRequest {
+  // The graph to reorient.
+  Graph graph = 1;
+  // True to produce a DIRECTED graph, false to produce an UNDIRECTED one.
+  // Converting to directed replaces each undirected edge with a pair of
+  // opposing edges; converting to undirected collapses any pair of opposing
+  // edges into one, keeping the smaller weight. A graph that already has the
+  // requested direction is returned unchanged.
+  bool directed = 2;
 }

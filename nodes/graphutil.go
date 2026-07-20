@@ -486,3 +486,12 @@ func (b *built) transposedWeightedGraph() graph.Graph {
 func errSelectionIDTooLong(limit int) error {
 	return fmt.Errorf("a selected node id exceeds the limit of %d bytes", limit)
 }
+
+// weightedLister exposes the graph through gonum's weighted interface, so an
+// edge's weight can be looked up by endpoint ids.
+func (b *built) weightedLister() graph.Weighted {
+	if b.directed {
+		return orderedWD{b.wdg}
+	}
+	return orderedWU{b.wug}
+}

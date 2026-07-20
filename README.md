@@ -3,7 +3,7 @@
 Composable graph-algorithm nodes for the Axiom marketplace, published as
 `christiangeorgelucas/graph-tools`.
 
-Ten stateless nodes answer the questions agents actually ask of a graph — *what
+Eleven stateless nodes answer the questions agents actually ask of a graph — *what
 is the cheapest route?*, *what order can I build this in?*, *what is reachable
 from here?*, *which node matters most?*, *is there a dependency cycle?* — over a
 single shared `Graph` envelope.
@@ -46,6 +46,7 @@ set `explicit_zero_weight`, which is how you express a genuine zero-cost edge.
 | `DetectCycle` | `Graph` → `CycleResult` | Whether a cycle exists, how many are independent, and one concrete example. |
 | `Describe` | `Graph` → `GraphStats` | Counts, density, mean degree, self-loops, total weight, connectivity, components, is-DAG. |
 | `Subgraph` | `SubgraphRequest` → **`Graph`** | The subgraph induced by a set of vertices. |
+| `Orient` | `OrientRequest` → **`Graph`** | Reinterprets edge direction — the bridge across the directed/undirected split. |
 
 ## Composing these nodes in a flow
 
@@ -69,6 +70,14 @@ pairs that compose with no adapter are
 `{MinimumSpanningTree, Subgraph} → {Describe, DetectCycle, ConnectedComponents, TopologicalSort, MinimumSpanningTree}`,
 minus `MinimumSpanningTree → TopologicalSort`, since a spanning tree is always
 undirected and `TopologicalSort` requires a directed graph.
+
+**Crossing the directed/undirected split.** `MinimumSpanningTree` requires an
+undirected graph and `TopologicalSort` requires a directed one, so `Orient`
+exists to convert between them mid-flow: `Orient → MinimumSpanningTree` lets a
+directed dependency graph reach a spanning tree without leaving the flow.
+Converting to undirected collapses opposing edge pairs, keeping the smaller
+weight; converting to directed replaces each undirected edge with an opposing
+pair, which preserves reachability but makes the result cyclic by construction.
 
 **Two different failure modes.** The eight nodes with a result message report a
 rejected request *in band*, as a structured `error` string with an HTTP 200 — so
