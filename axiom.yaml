@@ -1,0 +1,35 @@
+name: christiangeorgelucas/graph-tools
+version: 0.1.0
+language: go
+description: Composable Axiom graph-algorithm nodes (shortest path, distances, topological sort, connected components, minimum spanning tree, centrality, PageRank, cycle detection, stats, subgraph) over a single Graph envelope, wrapping the BSD-3-Clause gonum/graph library.
+nodes:
+    - name: ShortestPath
+      input: ShortestPathRequest
+      output: ShortestPathResult
+    - name: Distances
+      input: DistancesRequest
+      output: DistancesResult
+    - name: TopologicalSort
+      input: Graph
+      output: TopoSortResult
+    - name: ConnectedComponents
+      input: Graph
+      output: ComponentsResult
+    - name: MinimumSpanningTree
+      input: Graph
+      output: SpanningTreeResult
+    - name: Centrality
+      input: CentralityRequest
+      output: CentralityResult
+    - name: PageRank
+      input: PageRankRequest
+      output: PageRankResult
+    - name: DetectCycle
+      input: Graph
+      output: CycleResult
+    - name: Describe
+      input: Graph
+      output: GraphStats
+    - name: Subgraph
+      input: SubgraphRequest
+      output: SubgraphResult
