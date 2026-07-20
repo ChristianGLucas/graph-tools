@@ -2,6 +2,7 @@ package nodes_test
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	gen "christiangeorgelucas/graph-tools/gen"
@@ -250,5 +251,149 @@ func TestCentralityDeterminism(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// ── Directed / asymmetric coverage ───────────────────────────────────────────
+//
+// Every all-pairs oracle above runs on an UNDIRECTED path, which is
+// direction-symmetric — so a transposed measure produces identical numbers and
+// the bug cancels. That blind spot hid a real defect: eccentricity was computed
+// with gonum's incoming convention while the docs promised the outgoing one.
+// These tests use directed, asymmetric graphs where the two differ.
+
+// directedPath is a -> b -> c, unweighted. Out-distances: a reaches b (1) and
+// c (2); b reaches c (1); c reaches nothing.
+func directedPath() *gen.Graph {
+	return mkGraph(true, []string{"a", "b", "c"}, [][3]any{{"a", "b", 1}, {"b", "c", 1}})
+}
+
+// TestCentralityEccentricityIsOutgoingOnDirectedGraphs is the regression guard.
+// Eccentricity is the distance to the FARTHEST VERTEX THIS VERTEX CAN REACH, so
+// on a -> b -> c the source a scores 2 and the sink c scores 0. The transposed
+// (incoming) reading would give exactly the reverse, which is what shipped.
+func TestCentralityEccentricityIsOutgoingOnDirectedGraphs(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	got, err := nodes.Centrality(ctx, ax, &gen.CentralityRequest{Graph: directedPath(), Measure: "eccentricity"})
+	if err != nil || got.Error != "" {
+		t.Fatalf("err=%v nodeErr=%s", err, got.Error)
+	}
+	m := scoreMap(got)
+	for k, w := range map[string]float64{"a": 2, "b": 1, "c": 0} {
+		if !nearly(m[k], w, 1e-9) {
+			t.Errorf("eccentricity(%s) = %v, want %v (a reaches the whole graph; c reaches nothing)", k, m[k], w)
+		}
+	}
+}
+
+// TestCentralityEccentricityWeightedDirected uses distinct weights so the
+// answer cannot be produced by a symmetric accident.
+func TestCentralityEccentricityWeightedDirected(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	// a -> b costs 0.5, b -> c costs 10. a reaches c at 10.5.
+	g := mkGraph(true, []string{"a", "b", "c"}, [][3]any{{"a", "b", 0.5}, {"b", "c", 10}})
+	got, err := nodes.Centrality(ctx, ax, &gen.CentralityRequest{Graph: g, Measure: "eccentricity"})
+	if err != nil || got.Error != "" {
+		t.Fatalf("err=%v nodeErr=%s", err, got.Error)
+	}
+	m := scoreMap(got)
+	for k, w := range map[string]float64{"a": 10.5, "b": 10, "c": 0} {
+		if !nearly(m[k], w, 1e-9) {
+			t.Errorf("eccentricity(%s) = %v, want %v", k, m[k], w)
+		}
+	}
+}
+
+// TestCentralityClosenessIsIncomingOnDirectedGraphs pins the OTHER convention,
+// so the two can never silently drift into agreement. Closeness is the
+// reciprocal of the summed distance FROM every vertex that can reach it: on
+// a -> b -> c, c is reached from a (2) and b (1), giving 1/3.
+func TestCentralityClosenessIsIncomingOnDirectedGraphs(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	got, err := nodes.Centrality(ctx, ax, &gen.CentralityRequest{Graph: directedPath(), Measure: "closeness"})
+	if err != nil || got.Error != "" {
+		t.Fatalf("err=%v nodeErr=%s", err, got.Error)
+	}
+	m := scoreMap(got)
+	if !nearly(m["c"], 1.0/3, 1e-9) {
+		t.Errorf("closeness(c) = %v, want 1/3 (reached from a at 2 and b at 1)", m["c"])
+	}
+	if !nearly(m["b"], 1.0/1, 1e-9) {
+		t.Errorf("closeness(b) = %v, want 1 (reached from a at 1)", m["b"])
+	}
+	// `a` is reached by nobody: infinite farness, reported as a finite 0.
+	if m["a"] != 0 {
+		t.Errorf("closeness(a) = %v, want 0 (nothing reaches a)", m["a"])
+	}
+}
+
+// TestCentralityScoresAreAlwaysFinite is the regression guard for a real
+// defect: an unreachable vertex produced +Inf, which serialises out of a proto
+// `double` field as the STRING "Infinity" and poisons downstream arithmetic.
+func TestCentralityScoresAreAlwaysFinite(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	fixtures := map[string]*gen.Graph{
+		"directed source with no in-edges": directedPath(),
+		"isolated vertex":                  mkGraph(false, []string{"a", "b", "z"}, [][3]any{{"a", "b", 1}}),
+		"all isolated":                     mkGraph(false, []string{"x", "y"}, nil),
+		"disconnected halves": mkGraph(false, []string{"a", "b", "x", "y"},
+			[][3]any{{"a", "b", 1}, {"x", "y", 1}}),
+	}
+	for name, g := range fixtures {
+		for _, measure := range []string{"degree", "betweenness", "closeness", "harmonic", "eccentricity"} {
+			got, err := nodes.Centrality(ctx, ax, &gen.CentralityRequest{Graph: g, Measure: measure})
+			if err != nil || got.Error != "" {
+				t.Fatalf("%s/%s: err=%v nodeErr=%s", name, measure, err, got.Error)
+			}
+			for _, s := range got.Scores {
+				if math.IsInf(s.Score, 0) || math.IsNaN(s.Score) {
+					t.Errorf("%s/%s: score(%s) = %v, must be finite", name, measure, s.Node, s.Score)
+				}
+			}
+		}
+	}
+}
+
+// TestCentralityDegreeCountsSelfLoops pins the standard convention.
+func TestCentralityDegreeCountsSelfLoops(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	// Undirected: a has a self-loop (+2) and one edge to b (+1) = 3; b = 1.
+	g := mkGraph(false, []string{"a", "b"}, [][3]any{{"a", "a", 1}, {"a", "b", 1}})
+	got, err := nodes.Centrality(ctx, ax, &gen.CentralityRequest{Graph: g, Measure: "degree"})
+	if err != nil || got.Error != "" {
+		t.Fatalf("err=%v nodeErr=%s", err, got.Error)
+	}
+	m := scoreMap(got)
+	if m["a"] != 3 {
+		t.Errorf("degree(a) = %v, want 3 (self-loop counts 2, plus the edge to b)", m["a"])
+	}
+	if m["b"] != 1 {
+		t.Errorf("degree(b) = %v, want 1", m["b"])
+	}
+}
+
+// The all-pairs measures must refuse a graph whose VERTEX*EDGE product is too
+// large even when the vertex count alone is within bounds — a dense 600-vertex
+// graph passes the vertex cap while costing over a minute of CPU.
+func TestCentralityQuadraticProductBound(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	// 600 vertices, densely connected: well past the product budget.
+	var ids []string
+	for i := 0; i < 600; i++ {
+		ids = append(ids, "n"+itoa(i))
+	}
+	var edges [][3]any
+	for i := 0; i < 600 && len(edges) < 5000; i++ {
+		for j := i + 1; j < 600 && len(edges) < 5000; j++ {
+			edges = append(edges, [3]any{ids[i], ids[j], 1})
+		}
+	}
+	g := mkGraph(false, ids, edges)
+	got, err := nodes.Centrality(ctx, ax, &gen.CentralityRequest{Graph: g, Measure: "betweenness"})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if got.Error == "" {
+		t.Errorf("expected the nodes*edges product bound to fire on 600 nodes * %d edges", len(edges))
 	}
 }

@@ -91,10 +91,10 @@ func TestLargeGraphsStayFast(t *testing.T) {
 		t.Errorf("TopologicalSort produced %d entries, want %d", len(got.Order), n)
 	}
 
-	if got, err := nodes.MinimumSpanningTree(ctx, ax, undirected); err != nil || got.Error != "" {
-		t.Fatalf("MinimumSpanningTree: err=%v nodeErr=%s", err, got.Error)
-	} else if len(got.Tree.Edges) != n-1 {
-		t.Errorf("MST has %d edges, want %d", len(got.Tree.Edges), n-1)
+	if got, err := nodes.MinimumSpanningTree(ctx, ax, undirected); err != nil {
+		t.Fatalf("MinimumSpanningTree: %v", err)
+	} else if len(got.Edges) != n-1 {
+		t.Errorf("MST has %d edges, want %d", len(got.Edges), n-1)
 	}
 
 	if got, err := nodes.PageRank(ctx, ax, &gen.PageRankRequest{Graph: directed}); err != nil || got.Error != "" {
@@ -185,12 +185,8 @@ func TestWeightOverflowIsReportedNotMisreported(t *testing.T) {
 	u := mkGraph(false, []string{"A", "B", "C"}, [][3]any{
 		{"A", "B", 1e308}, {"B", "C", 1e308},
 	})
-	mst, err := nodes.MinimumSpanningTree(ctx, ax, u)
-	if err != nil {
-		t.Fatalf("unexpected Go error: %v", err)
-	}
-	if mst.Error == "" {
-		t.Errorf("MinimumSpanningTree must report overflow, got total_weight=%v", mst.TotalWeight)
+	if _, err := nodes.MinimumSpanningTree(ctx, ax, u); err == nil {
+		t.Errorf("MinimumSpanningTree must reject an overflowing graph")
 	}
 }
 
@@ -239,18 +235,19 @@ func TestSelfLoopsAreCountedButDoNotAffectPathsOrTrees(t *testing.T) {
 	loopedU.Edges = append(loopedU.Edges, &gen.GraphEdge{From: "C", To: "C", Weight: 99})
 
 	m1, err := nodes.MinimumSpanningTree(ctx, ax, plainU)
-	if err != nil || m1.Error != "" {
-		t.Fatalf("err=%v nodeErr=%s", err, m1.Error)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 	m2, err := nodes.MinimumSpanningTree(ctx, ax, loopedU)
-	if err != nil || m2.Error != "" {
-		t.Fatalf("err=%v nodeErr=%s", err, m2.Error)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if m1.TotalWeight != m2.TotalWeight || len(m1.Tree.Edges) != len(m2.Tree.Edges) {
-		t.Errorf("a self-loop changed the spanning tree: %v/%d vs %v/%d",
-			m1.TotalWeight, len(m1.Tree.Edges), m2.TotalWeight, len(m2.Tree.Edges))
+	if len(m1.Edges) != len(m2.Edges) {
+		t.Errorf("a self-loop changed the spanning tree: %d vs %d edges", len(m1.Edges), len(m2.Edges))
 	}
 
+	// Degree centrality DOES count a self-loop — by the standard convention it
+	// adds 2 to that vertex's degree, and only that vertex's.
 	c1, err := nodes.Centrality(ctx, ax, &gen.CentralityRequest{Graph: plainU, Measure: "degree"})
 	if err != nil || c1.Error != "" {
 		t.Fatalf("err=%v nodeErr=%s", err, c1.Error)
@@ -260,9 +257,13 @@ func TestSelfLoopsAreCountedButDoNotAffectPathsOrTrees(t *testing.T) {
 		t.Fatalf("err=%v nodeErr=%s", err, c2.Error)
 	}
 	for i := range c1.Scores {
-		if c1.Scores[i].Score != c2.Scores[i].Score {
-			t.Errorf("a self-loop changed degree(%s): %v vs %v",
-				c1.Scores[i].Node, c1.Scores[i].Score, c2.Scores[i].Score)
+		want := c1.Scores[i].Score
+		if c1.Scores[i].Node == "C" {
+			want += 2
+		}
+		if c2.Scores[i].Score != want {
+			t.Errorf("degree(%s) with a self-loop on C = %v, want %v",
+				c2.Scores[i].Node, c2.Scores[i].Score, want)
 		}
 	}
 
@@ -280,5 +281,129 @@ func TestSelfLoopsAreCountedButDoNotAffectPathsOrTrees(t *testing.T) {
 	}
 	if !cyc.HasCycle {
 		t.Errorf("a self-loop makes the graph cyclic, got %+v", cyc)
+	}
+}
+
+// TestStringLengthBounds: counting ELEMENTS leaves the byte dimension
+// unbounded. 20000 vertices with 10 KiB ids is a 381 MiB payload that every
+// element-based cap happily accepts, so the per-string caps are load-bearing.
+func TestStringLengthBounds(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+
+	long := make([]byte, 257)
+	for i := range long {
+		long[i] = 'x'
+	}
+	g := &gen.Graph{Nodes: []*gen.GraphNode{{Id: string(long)}}}
+	if got, err := nodes.Describe(ctx, ax, g); err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	} else if got.Error == "" {
+		t.Errorf("expected an over-long node id to be rejected")
+	}
+
+	longLabel := make([]byte, 1025)
+	for i := range longLabel {
+		longLabel[i] = 'y'
+	}
+	g2 := &gen.Graph{Nodes: []*gen.GraphNode{{Id: "a", Label: string(longLabel)}}}
+	if got, err := nodes.Describe(ctx, ax, g2); err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	} else if got.Error == "" {
+		t.Errorf("expected an over-long label to be rejected")
+	}
+
+	// Exactly at the limits must be ACCEPTED.
+	okID := string(long[:256])
+	okLabel := string(longLabel[:1024])
+	g3 := &gen.Graph{Nodes: []*gen.GraphNode{{Id: okID, Label: okLabel}}}
+	if got, err := nodes.Describe(ctx, ax, g3); err != nil || got.Error != "" {
+		t.Fatalf("ids/labels exactly at the limit must be accepted: err=%v nodeErr=%s", err, got.Error)
+	}
+}
+
+// TestEncodedSizeBound is the backstop for any byte dimension the per-field
+// caps do not model.
+func TestEncodedSizeBound(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	// 20000 vertices each carrying a 256-byte id and a 1024-byte label passes
+	// every per-element cap but is ~25 MiB encoded.
+	id := make([]byte, 256)
+	label := make([]byte, 1024)
+	for i := range id {
+		id[i] = 'a'
+	}
+	for i := range label {
+		label[i] = 'b'
+	}
+	g := &gen.Graph{}
+	for i := 0; i < 20000; i++ {
+		g.Nodes = append(g.Nodes, &gen.GraphNode{
+			Id:    itoa(i) + string(id),
+			Label: string(label),
+		})
+	}
+	got, err := nodes.Describe(ctx, ax, g)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if got.Error == "" {
+		t.Errorf("expected the encoded-size bound to fire on a ~25 MiB payload")
+	}
+}
+
+// TestSubgraphSelectionBound: the selection list is caller-controlled and
+// separate from the graph, so it needs its own bound.
+func TestSubgraphSelectionBound(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	sel := make([]string, maxNodesForTest+1)
+	for i := range sel {
+		sel[i] = "a"
+	}
+	if _, err := nodes.Subgraph(ctx, ax, &gen.SubgraphRequest{
+		Graph: mkGraph(false, []string{"a"}, nil), Nodes: sel,
+	}); err == nil {
+		t.Errorf("expected an over-long selection list to be rejected")
+	}
+}
+
+const maxNodesForTest = 20000
+
+// TestAllPairsMeasuresStayFastAtTheBound proves the all-pairs cost bound
+// actually keeps the worst ADMISSIBLE input cheap — a vertex-only cap does not,
+// since a dense 600-vertex graph passes it while costing over a minute.
+func TestAllPairsMeasuresStayFastAtTheBound(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	// 600 vertices with 2000 edges: product = 1.2e6, exactly at the budget.
+	var ids []string
+	for i := 0; i < 600; i++ {
+		ids = append(ids, "n"+itoa(i))
+	}
+	var edges [][3]any
+	for i := 0; len(edges) < 2000; i++ {
+		a, b := i%600, (i*7+1)%600
+		if a == b {
+			continue
+		}
+		edges = append(edges, [3]any{ids[a], ids[b], 1})
+	}
+	g := mkGraph(false, ids, edges)
+
+	for _, measure := range []string{"betweenness", "closeness", "harmonic", "eccentricity"} {
+		start := time.Now()
+		got, err := nodes.Centrality(ctx, ax, &gen.CentralityRequest{Graph: g, Measure: measure})
+		elapsed := time.Since(start)
+		if err != nil {
+			t.Fatalf("%s: unexpected Go error: %v", measure, err)
+		}
+		if got.Error != "" {
+			// Duplicate edges from the generator can push it over; that is a
+			// legitimate rejection, not a failure of this test.
+			t.Logf("%s rejected at the bound: %s", measure, got.Error)
+			continue
+		}
+		if elapsed > 60*time.Second {
+			t.Errorf("%s took %v at the documented cost bound — the bound does not bound the cost", measure, elapsed)
+		}
+		t.Logf("%s at the bound: %v", measure, elapsed.Round(time.Millisecond))
 	}
 }

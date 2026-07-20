@@ -24,6 +24,9 @@ func DetectCycle(ctx context.Context, ax axiom.Context, input *gen.Graph) (*gen.
 	if err != nil {
 		return &gen.CycleResult{Error: err.Error()}, nil
 	}
+	if err := ctx.Err(); err != nil {
+		return &gen.CycleResult{Error: "cancelled: " + err.Error()}, nil
+	}
 
 	out := &gen.CycleResult{}
 

@@ -21,6 +21,9 @@ func Distances(ctx context.Context, ax axiom.Context, input *gen.DistancesReques
 	if err != nil {
 		return &gen.DistancesResult{Error: err.Error()}, nil
 	}
+	if err := ctx.Err(); err != nil {
+		return &gen.DistancesResult{Error: "cancelled: " + err.Error()}, nil
+	}
 	fromID, ok := b.idOf[input.From]
 	if !ok {
 		return &gen.DistancesResult{Error: "unknown source node id " + quote(input.From)}, nil

@@ -54,11 +54,15 @@ func orderedWeightedEdges(it graph.WeightedEdges) graph.WeightedEdges {
 
 // ── weighted undirected ──────────────────────────────────────────────────────
 
-type orderedWU struct{ *simple.WeightedUndirectedGraph }
+type orderedWU struct {
+	*simple.WeightedUndirectedGraph
+}
 
-func (g orderedWU) Nodes() graph.Nodes                  { return orderedNodes(g.WeightedUndirectedGraph.Nodes()) }
-func (g orderedWU) From(id int64) graph.Nodes           { return orderedNodes(g.WeightedUndirectedGraph.From(id)) }
-func (g orderedWU) Edges() graph.Edges                  { return orderedEdges(g.WeightedUndirectedGraph.Edges()) }
+func (g orderedWU) Nodes() graph.Nodes { return orderedNodes(g.WeightedUndirectedGraph.Nodes()) }
+func (g orderedWU) From(id int64) graph.Nodes {
+	return orderedNodes(g.WeightedUndirectedGraph.From(id))
+}
+func (g orderedWU) Edges() graph.Edges { return orderedEdges(g.WeightedUndirectedGraph.Edges()) }
 func (g orderedWU) WeightedEdges() graph.WeightedEdges {
 	return orderedWeightedEdges(g.WeightedUndirectedGraph.WeightedEdges())
 }

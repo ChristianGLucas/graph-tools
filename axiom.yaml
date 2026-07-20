@@ -1,35 +1,56 @@
 name: christiangeorgelucas/graph-tools
-version: 0.1.0
+version: 0.2.0
 language: go
-description: Composable Axiom graph-algorithm nodes (shortest path, distances, topological sort, connected components, minimum spanning tree, centrality, PageRank, cycle detection, stats, subgraph) over a single Graph envelope, wrapping the BSD-3-Clause gonum/graph library.
+description: Composable graph-algorithm nodes — shortest path, distances, topological sort, connected components, minimum spanning tree, centrality, PageRank, cycle detection, structural stats and induced subgraphs — over a single canonical Graph envelope, wrapping the BSD-3-Clause gonum/graph library. Every node is stateless, deterministic for a given input, and rejects malformed graphs with a structured error rather than guessing.
+license: MIT
+author: Christian George Lucas
+tags:
+    - graph
+    - algorithms
+    - shortest-path
+    - pagerank
+    - centrality
+    - topological-sort
+    - dependency-graph
+    - network-analysis
 nodes:
     - name: ShortestPath
       input: ShortestPathRequest
       output: ShortestPathResult
+      description: Finds the cheapest route between two vertices and returns the ordered vertex ids, the total weight and the hop count. Uses Dijkstra's algorithm, switching automatically to Bellman-Ford when the graph has negative edge weights, and reports a reachable negative-weight cycle as a structured error instead of returning nonsense. Returns found=false when no path exists; check the error field first, since found is also false for a rejected request.
     - name: Distances
       input: DistancesRequest
       output: DistancesResult
+      description: Computes the shortest-path cost and hop count from one source vertex to every vertex it can reach, and separately lists the vertices it cannot. The single-source companion to ShortestPath, for when you need the whole reachability picture rather than one route. Uses the same Dijkstra/Bellman-Ford selection and the same negative-cycle error contract.
     - name: TopologicalSort
       input: Graph
       output: TopoSortResult
+      description: Orders the vertices of a directed acyclic graph so that every edge points from an earlier vertex to a later one — the build, install or task order of a dependency graph. Ties are broken by vertex id so the ordering is stable across runs. Requires a directed graph, and reports is_dag=false with an empty order when a cycle (including a self-loop) makes ordering impossible.
     - name: ConnectedComponents
       input: Graph
       output: ComponentsResult
+      description: Partitions a graph into groups of mutually-reachable vertices. For an undirected graph these are the connected components; for a directed graph they are the strongly connected components via Tarjan's algorithm, and strongly_connected is set to true so the caller knows which was computed. Components and their members are sorted by vertex id.
     - name: MinimumSpanningTree
       input: Graph
-      output: SpanningTreeResult
+      output: Graph
+      description: Selects the cheapest set of edges that connects every vertex without forming a cycle, using Kruskal's algorithm. Returns the tree as a plain Graph, so it feeds directly into Describe, DetectCycle, ConnectedComponents or TopologicalSort with no adapter. A disconnected input yields a minimum spanning forest rather than an error. Requires an undirected graph; pipe the result into Describe to recover the tree's total weight.
     - name: Centrality
       input: CentralityRequest
       output: CentralityResult
+      description: Scores every vertex by structural importance under one of five measures — degree, betweenness, closeness, harmonic or eccentricity — to answer which vertex is the hub, the bottleneck or the outlier. Degree is purely structural and works on any graph; the other four need an all-pairs shortest-path computation and so reject negative weights and graphs above 600 vertices or a 1200000 vertex-edge product. Scores are always finite, with unreachable vertices scoring 0.
     - name: PageRank
       input: PageRankRequest
       output: PageRankResult
+      description: Ranks vertices by link importance using the PageRank power iteration — a vertex matters when vertices that matter point at it. Honours self-loops and treats an undirected graph as bidirectional. Scores sum to 1 and are rounded to 6 decimal places so the output is reproducible despite the iteration starting from a random vector. Edge weights are ignored; only the link topology counts.
     - name: DetectCycle
       input: Graph
       output: CycleResult
+      description: Reports whether a graph contains a cycle and returns one concrete example cycle as evidence — the node to reach for when validating that a dependency, task or reference graph is acyclic. Works on both directed and undirected graphs, counting independent cycles via strongly connected components for directed input and via the circuit rank for undirected input. Self-loops count as cycles.
     - name: Describe
       input: Graph
       output: GraphStats
+      description: Summarises the structure of a graph in one call — vertex and edge counts, density, mean degree, self-loop count, total edge weight, connectivity, component count and whether a directed graph is acyclic. The cheap triage node to run before choosing a more expensive analysis, and the way to weigh a MinimumSpanningTree result.
     - name: Subgraph
       input: SubgraphRequest
-      output: SubgraphResult
+      output: Graph
+      description: Extracts the subgraph induced by a set of vertices, keeping exactly those vertices and every edge whose endpoints are both kept. Returns a plain Graph, so it chains directly into any graph-consuming node with no adapter — the standard way to narrow a large graph before running an expensive all-pairs measure on it. A requested vertex id that is not in the source graph is rejected rather than silently ignored.

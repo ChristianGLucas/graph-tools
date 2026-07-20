@@ -2,6 +2,8 @@ package nodes
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"sort"
 
 	"gonum.org/v1/gonum/graph/network"
@@ -11,12 +13,13 @@ import (
 )
 
 // Ranks vertices by link importance using the PageRank power iteration: a
-// vertex is important when important vertices point at it. Scores sum to 1 and
-// are rounded to 6 decimal places, which makes the result reproducible despite
-// the underlying iteration starting from a randomly seeded vector. An
-// undirected graph is treated as a directed graph with each edge present in
-// both directions. Edge weights are ignored — PageRank here is computed on the
-// link topology only.
+// vertex is important when important vertices point at it. Self-loops are
+// honoured, since a self-loop is a genuine rank sink that changes every score.
+// An undirected graph is treated as a directed graph with each edge present in
+// both directions. Edge weights are ignored — the ranking is computed on the
+// link topology only. Scores sum to 1 and are rounded to 6 decimal places,
+// which makes the result reproducible despite the underlying iteration
+// starting from a randomly seeded vector.
 func PageRank(ctx context.Context, ax axiom.Context, input *gen.PageRankRequest) (*gen.PageRankResult, error) {
 	if input == nil {
 		return &gen.PageRankResult{Error: "request is required"}, nil
@@ -29,26 +32,41 @@ func PageRank(ctx context.Context, ax axiom.Context, input *gen.PageRankRequest)
 		return &gen.PageRankResult{Error: "graph has no nodes"}, nil
 	}
 	if len(b.ids) > maxPageRankNodes {
-		return &gen.PageRankResult{Error: "graph exceeds the PageRank node limit"}, nil
+		return &gen.PageRankResult{Error: fmt.Sprintf(
+			"graph has %d nodes, exceeding the PageRank limit of %d", len(b.ids), maxPageRankNodes)}, nil
 	}
 
 	damping := input.Damping
+	// NaN must be rejected BEFORE the range check. Every comparison against a
+	// NaN is false, so `damping <= 0 || damping >= 1` lets NaN through, and the
+	// power iteration's convergence test then never becomes true — an infinite
+	// loop driven by one caller-supplied field.
+	if math.IsNaN(damping) || math.IsInf(damping, 0) {
+		return &gen.PageRankResult{Error: "damping must be a finite value strictly between 0 and 1"}, nil
+	}
 	if damping == 0 {
 		damping = 0.85
 	}
 	if damping <= 0 || damping >= 1 {
 		return &gen.PageRankResult{Error: "damping must be strictly between 0 and 1"}, nil
 	}
+
+	if err := ctx.Err(); err != nil {
+		return &gen.PageRankResult{Error: "cancelled before computing PageRank: " + err.Error()}, nil
+	}
+
 	// The tolerance is pinned rather than caller-supplied: gonum seeds the
 	// power iteration with a random vector, so the converged result varies
-	// within the tolerance. Converging to 1e-14 (residual error under ~1e-13
-	// for any admissible damping) and then rounding to 6 decimal places puts
-	// the rounding granularity seven orders of magnitude above the noise, so
-	// the emitted scores are reproducible.
+	// within the tolerance. Converging to 1e-14 and then rounding to 6 decimal
+	// places puts the rounding granularity far above the residual noise, so the
+	// emitted scores are reproducible.
 	const pageRankTolerance = 1e-14
 	const pageRankDecimals = 6
 
-	scores := network.PageRank(b.directedView(), damping, pageRankTolerance)
+	// PageRankSparse, NOT PageRank: the dense variant allocates a V*V float64
+	// matrix, which at the vertex limit is over 3 GB and OOM-kills the process.
+	// The sparse variant is O(V+E) and returns the same answer.
+	scores := network.PageRankSparse(b.pageRankView(input.Graph), damping, pageRankTolerance)
 
 	out := &gen.PageRankResult{Damping: damping}
 	for _, id := range b.ids {

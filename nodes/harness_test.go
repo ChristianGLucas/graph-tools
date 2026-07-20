@@ -110,7 +110,7 @@ func eqStrings(a, b []string) bool {
 	return true
 }
 
-func math_NaN() float64     { return math.NaN() }
+func math_NaN() float64      { return math.NaN() }
 func math_Inf(s int) float64 { return math.Inf(s) }
 
 func itoa(i int) string { return strconv.Itoa(i) }

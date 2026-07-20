@@ -2,7 +2,9 @@ package nodes_test
 
 import (
 	"context"
+	"math"
 	"testing"
+	"time"
 
 	gen "christiangeorgelucas/graph-tools/gen"
 	"christiangeorgelucas/graph-tools/nodes"
@@ -120,9 +122,10 @@ func TestPageRankScoresAreRounded(t *testing.T) {
 		t.Fatalf("err=%v nodeErr=%s", err, got.Error)
 	}
 	for _, s := range got.Scores {
-		scaled := s.Score * 1e6
-		if scaled != float64(int64(scaled)) {
-			t.Errorf("score(%s) = %v is not rounded to 6 decimal places", s.Node, s.Score)
+		// Compare against an independent re-rounding rather than asserting an
+		// exact-equality property of a floating-point product.
+		if want := math.Round(s.Score*1e6) / 1e6; s.Score != want {
+			t.Errorf("score(%s) = %v is not rounded to 6 decimal places (re-rounds to %v)", s.Node, s.Score, want)
 		}
 	}
 }
@@ -151,5 +154,107 @@ func TestPageRankDeterminism(t *testing.T) {
 				t.Fatalf("nondeterministic PageRank: run %d gave %v, first gave %v", i, cur, first)
 			}
 		}
+	}
+}
+
+// TestPageRankHonoursSelfLoops is the regression guard for a real defect: the
+// shared builder strips self-loops before handing the graph to gonum (gonum's
+// simple graphs panic on a self-edge), which silently produced materially wrong
+// PageRank scores. A self-loop is a rank sink and must be part of the topology.
+//
+// Oracle: on a -> a, b -> a, c -> a with damping 0.85, b and c are pure sources
+// with no in-edges, so each holds exactly the teleport share (1-d)/n = 0.15/3 =
+// 0.05, and a holds the remaining 0.9. That is a closed form, derived from the
+// PageRank definition rather than from this implementation.
+func TestPageRankHonoursSelfLoops(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	g := mkGraph(true, []string{"a", "b", "c"}, [][3]any{
+		{"a", "a", 1}, {"b", "a", 1}, {"c", "a", 1},
+	})
+	got, err := nodes.PageRank(ctx, ax, &gen.PageRankRequest{Graph: g})
+	if err != nil || got.Error != "" {
+		t.Fatalf("err=%v nodeErr=%s", err, got.Error)
+	}
+	m := map[string]float64{}
+	for _, s := range got.Scores {
+		m[s.Node] = s.Score
+	}
+	for k, w := range map[string]float64{"a": 0.9, "b": 0.05, "c": 0.05} {
+		if !nearly(m[k], w, 1e-5) {
+			t.Errorf("score(%s) = %v, closed form = %v", k, m[k], w)
+		}
+	}
+}
+
+// A self-loop must actually CHANGE the scores relative to the same graph
+// without it — otherwise the loop is still being discarded.
+func TestPageRankSelfLoopChangesScores(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	base := mkGraph(true, []string{"a", "b", "c"}, [][3]any{{"b", "a", 1}, {"c", "a", 1}})
+	looped := mkGraph(true, []string{"a", "b", "c"}, [][3]any{
+		{"a", "a", 1}, {"b", "a", 1}, {"c", "a", 1},
+	})
+	r1, err := nodes.PageRank(ctx, ax, &gen.PageRankRequest{Graph: base})
+	if err != nil || r1.Error != "" {
+		t.Fatalf("err=%v nodeErr=%s", err, r1.Error)
+	}
+	r2, err := nodes.PageRank(ctx, ax, &gen.PageRankRequest{Graph: looped})
+	if err != nil || r2.Error != "" {
+		t.Fatalf("err=%v nodeErr=%s", err, r2.Error)
+	}
+	same := true
+	for i := range r1.Scores {
+		if r1.Scores[i].Score != r2.Scores[i].Score {
+			same = false
+		}
+	}
+	if same {
+		t.Errorf("adding a self-loop on `a` did not change any score — the loop is being discarded: %v", r2.Scores)
+	}
+}
+
+// TestPageRankRejectsNonFiniteDamping is the regression guard for a remote
+// denial of service: NaN fails every comparison, so a `damping <= 0 ||
+// damping >= 1` range check lets it through, and the power iteration's
+// convergence test then never becomes true — an infinite loop, reachable from
+// the wire, that permanently burns a core. The test asserts both that the value
+// is rejected AND that the call returns promptly.
+func TestPageRankRejectsNonFiniteDamping(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	g := mkGraph(true, []string{"a", "b"}, [][3]any{{"a", "b", 1}})
+
+	for _, bad := range []float64{math_NaN(), math_Inf(1), math_Inf(-1)} {
+		done := make(chan *gen.PageRankResult, 1)
+		go func(d float64) {
+			r, err := nodes.PageRank(ctx, ax, &gen.PageRankRequest{Graph: g, Damping: d})
+			if err != nil {
+				t.Errorf("unexpected Go error: %v", err)
+			}
+			done <- r
+		}(bad)
+
+		select {
+		case r := <-done:
+			if r.Error == "" {
+				t.Errorf("damping %v must be rejected, got %+v", bad, r)
+			}
+		case <-time.After(15 * time.Second):
+			t.Fatalf("damping %v did not return within 15s — the power iteration is not terminating", bad)
+		}
+	}
+}
+
+// TestPageRankUndirectedIsBidirectional pins the documented undirected handling.
+func TestPageRankUndirectedIsBidirectional(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	// An undirected edge a-b makes a and b structurally identical, so a
+	// symmetric graph must give every vertex the same score.
+	g := mkGraph(false, []string{"a", "b"}, [][3]any{{"a", "b", 1}})
+	got, err := nodes.PageRank(ctx, ax, &gen.PageRankRequest{Graph: g})
+	if err != nil || got.Error != "" {
+		t.Fatalf("err=%v nodeErr=%s", err, got.Error)
+	}
+	if !nearly(got.Scores[0].Score, 0.5, 1e-5) || !nearly(got.Scores[1].Score, 0.5, 1e-5) {
+		t.Errorf("an undirected edge must be symmetric, got %v", got.Scores)
 	}
 }

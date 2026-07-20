@@ -10,13 +10,17 @@ import (
 )
 
 // Summarises the structure of a graph: vertex and edge counts, edge density,
-// mean degree, self-loop count, connectivity, component count, and whether a
-// directed graph is acyclic. Connectivity and component_count use weak
-// connectivity (edge direction ignored) for directed input.
+// mean degree, self-loop count, total edge weight, connectivity, component
+// count, and whether a directed graph is acyclic. Connectivity and
+// component_count use weak connectivity (edge direction ignored) for directed
+// input. Piping a MinimumSpanningTree result in here is how you weigh the tree.
 func Describe(ctx context.Context, ax axiom.Context, input *gen.Graph) (*gen.GraphStats, error) {
 	b, err := buildGraph(input)
 	if err != nil {
 		return &gen.GraphStats{Error: err.Error()}, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return &gen.GraphStats{Error: "cancelled: " + err.Error()}, nil
 	}
 
 	n := len(b.ids)
@@ -26,18 +30,19 @@ func Describe(ctx context.Context, ax axiom.Context, input *gen.Graph) (*gen.Gra
 		EdgeCount:     int32(m),
 		Directed:      b.directed,
 		SelfLoopCount: int32(b.selfLoops),
+		TotalWeight:   b.totalWeight,
 	}
 
 	comps := b.weakComponents()
 	out.ComponentCount = int32(len(comps))
 	out.IsConnected = n > 0 && len(comps) == 1
 
+	// Mean TOTAL degree, counting in+out for a directed graph. Summing every
+	// vertex's degree gives 2*|E| either way, so this is 2|E|/|V| in both
+	// cases — and it is exactly the mean of what Centrality's "degree" measure
+	// reports per vertex, so the two nodes cannot disagree about a graph.
 	if n > 0 {
-		if b.directed {
-			out.AverageDegree = float64(m) / float64(n)
-		} else {
-			out.AverageDegree = 2 * float64(m) / float64(n)
-		}
+		out.AverageDegree = 2 * float64(m) / float64(n)
 	}
 
 	// Density counts only the simple (non-self-loop) edges a simple graph can

@@ -1,8 +1,15 @@
 // Data contracts for christiangeorgelucas/graph-tools.
 //
-// The canonical envelope is `Graph`: every node in this package consumes it,
-// and the graph-producing nodes (MinimumSpanningTree, Subgraph) emit it, so
-// nodes chain directly without adapters.
+// The canonical envelope is `Graph`. The graph-producing nodes
+// (MinimumSpanningTree, Subgraph) return `Graph` as their TOP-LEVEL output
+// message, and the graph-consuming nodes (TopologicalSort, ConnectedComponents,
+// DetectCycle, Describe) take `Graph` as their top-level input, so those nodes
+// wire together in a flow with an identity edge and no adapter.
+//
+// NOTE ON DOC COMMENTS: every field comment in this file is a LEADING comment
+// (on its own line, above the field). Trailing comments are discarded by the
+// schema compiler and never reach the registry, so field documentation written
+// after the semicolon is invisible to anyone browsing the marketplace.
 
 syntax = "proto3";
 
@@ -10,123 +17,190 @@ package christiangeorgelucas.graph_tools;
 
 option go_package = ".;gen";
 
-// A single vertex. `id` is the caller's own stable identifier (any non-empty
-// string); `label` is optional free-form metadata carried through unchanged by
-// graph-emitting nodes.
+// A single vertex of a graph.
 message GraphNode {
-  string id = 1;    // Stable unique vertex identifier. Non-empty; duplicates are rejected.
-  string label = 2; // Optional human-readable label, preserved by graph-emitting nodes.
+  // Stable unique vertex identifier, chosen by the caller. Must be non-empty
+  // and at most 256 bytes. Duplicate ids are rejected.
+  string id = 1;
+  // Optional human-readable label, at most 1024 bytes. Carried through
+  // unchanged by the graph-producing nodes.
+  string label = 2;
 }
 
-// A single edge between two vertices that MUST already exist in `Graph.nodes`.
-// Edges referencing an unknown vertex id are rejected rather than silently
-// creating the vertex.
+// A single edge between two vertices that must already exist in `Graph.nodes`.
+// An edge naming a vertex id that is not in the graph is rejected rather than
+// silently creating that vertex.
 message GraphEdge {
-  string from = 1;   // Source vertex id (tail). Must appear in Graph.nodes.
-  string to = 2;     // Target vertex id (head). Must appear in Graph.nodes.
-  double weight = 3; // Edge cost. Defaults to 1.0 when omitted/zero unless `explicit_zero_weight` is set. Must be finite.
-  // When true, a `weight` of 0 is taken literally as zero cost instead of
-  // being defaulted to 1.0. Lets callers express genuine zero-cost edges.
+  // Source vertex id (the tail). Must appear in Graph.nodes.
+  string from = 1;
+  // Target vertex id (the head). Must appear in Graph.nodes.
+  string to = 2;
+  // Edge cost. IMPORTANT: an omitted or zero weight is treated as 1.0 unless
+  // `explicit_zero_weight` is set — so sending 0 gives you a cost of 1, not 0.
+  // Must be finite; NaN and infinity are rejected.
+  double weight = 3;
+  // Set this to true to make a `weight` of 0 mean a genuine zero cost instead
+  // of being defaulted to 1.0. Needed only for zero-cost edges.
   bool explicit_zero_weight = 4;
 }
 
-// The canonical graph envelope shared by every node in this package.
-// A graph is a set of uniquely-identified vertices plus edges between them.
+// The canonical graph envelope shared by every node in this package: a set of
+// uniquely-identified vertices plus the edges between them.
+//
+// Limits, enforced on the raw input before anything is allocated: at most
+// 20000 vertices, at most 200000 edges, and at most 8 MiB of total encoded
+// size. Individual all-pairs operations impose tighter limits of their own.
 message Graph {
-  bool directed = 1;              // True for a directed graph; false for an undirected graph.
-  repeated GraphNode nodes = 2;   // The vertices. Ids must be unique and non-empty.
-  repeated GraphEdge edges = 3;   // The edges. Endpoints must reference existing vertex ids.
+  // True for a directed graph, false for an undirected graph. Several nodes
+  // require one or the other and say so in their description.
+  bool directed = 1;
+  // The vertices. Ids must be unique and non-empty.
+  repeated GraphNode nodes = 2;
+  // The edges. Both endpoints of every edge must reference an existing vertex.
+  repeated GraphEdge edges = 3;
 }
 
-// Request for a single source-to-target shortest path.
+// A request for the single cheapest path between two vertices.
 message ShortestPathRequest {
-  Graph graph = 1;  // The graph to search.
-  string from = 2;  // Source vertex id.
-  string to = 3;    // Target vertex id.
+  // The graph to search.
+  Graph graph = 1;
+  // Source vertex id. Must exist in the graph.
+  string from = 2;
+  // Target vertex id. Must exist in the graph.
+  string to = 3;
 }
 
 // A shortest path and its total cost.
+//
+// Check `error` FIRST: when `error` is non-empty the request was rejected and
+// every other field is meaningless. `found` is false both when no path exists
+// and when the request was rejected, so `found` alone cannot tell the two apart.
 message ShortestPathResult {
-  bool found = 1;             // True when a path exists from `from` to `to`.
-  repeated string path = 2;   // Vertex ids in order from source to target (empty when not found).
-  double total_weight = 3;    // Sum of the traversed edge weights (0 when not found).
-  int32 hop_count = 4;        // Number of edges traversed (len(path)-1; 0 when not found).
-  string error = 5;           // Structured error message; empty on success.
+  // True when a path exists from `from` to `to` AND `error` is empty.
+  bool found = 1;
+  // The vertex ids in order from source to target. Empty when not found.
+  repeated string path = 2;
+  // The sum of the traversed edge weights. Zero when not found.
+  double total_weight = 3;
+  // The number of edges traversed, i.e. len(path)-1. Zero when not found.
+  int32 hop_count = 4;
+  // Structured error message. Empty on success.
+  string error = 5;
 }
 
-// Request for shortest-path distances from one source to every reachable vertex.
+// A request for the shortest-path distance from one source to every vertex.
 message DistancesRequest {
-  Graph graph = 1; // The graph to search.
-  string from = 2; // Source vertex id.
+  // The graph to search.
+  Graph graph = 1;
+  // Source vertex id. Must exist in the graph.
+  string from = 2;
 }
 
-// The shortest-path distance from a source to one vertex.
+// The shortest-path distance from the source to one vertex.
 message Distance {
-  string node = 1;     // Target vertex id.
-  double weight = 2;   // Total shortest-path cost from the source.
-  int32 hop_count = 3; // Number of edges on that shortest path.
+  // The target vertex id.
+  string node = 1;
+  // The total shortest-path cost from the source to this vertex.
+  double weight = 2;
+  // The number of edges on that shortest path.
+  int32 hop_count = 3;
 }
 
 // Distances from a single source to every reachable vertex.
+//
+// Check `error` first; when it is non-empty the other fields are meaningless.
 message DistancesResult {
-  repeated Distance distances = 1;   // Reachable vertices, sorted by vertex id. Includes the source at distance 0.
-  repeated string unreachable = 2;   // Vertex ids with no path from the source, sorted.
-  string error = 3;                  // Structured error message; empty on success.
+  // Every reachable vertex, sorted by vertex id. Includes the source itself at
+  // distance 0.
+  repeated Distance distances = 1;
+  // Vertex ids with no path from the source, sorted.
+  repeated string unreachable = 2;
+  // Structured error message. Empty on success.
+  string error = 3;
 }
 
-// A topological ordering of a directed acyclic graph.
+// A topological (dependency) ordering of a directed acyclic graph.
+//
+// Check `error` first: `is_dag` is false both for a cyclic graph and for a
+// rejected request.
 message TopoSortResult {
-  bool is_dag = 1;            // True when the graph is a DAG and `order` is valid.
-  repeated string order = 2;  // Vertices in dependency order (empty when not a DAG).
-  string error = 3;           // Structured error message; empty on success.
+  // True when the graph is a DAG and `order` is therefore valid.
+  bool is_dag = 1;
+  // The vertices in dependency order: every edge points from an earlier entry
+  // to a later one. Empty when the graph is not a DAG.
+  repeated string order = 2;
+  // Structured error message. Empty on success.
+  string error = 3;
 }
 
-// One connected component: a set of mutually-reachable vertices.
+// One component: a set of mutually-reachable vertices.
 message Component {
-  repeated string nodes = 1; // Vertex ids in this component, sorted.
+  // The vertex ids in this component, sorted.
+  repeated string nodes = 1;
 }
 
 // The connected components of a graph.
 message ComponentsResult {
-  repeated Component components = 1; // Components, each sorted, ordered by their smallest vertex id.
-  int32 count = 2;                   // Number of components.
-  bool strongly_connected = 3;       // True when strongly-connected components were computed (directed input).
-  string error = 4;                  // Structured error message; empty on success.
+  // The components, each internally sorted, ordered by their smallest member.
+  repeated Component components = 1;
+  // The number of components.
+  int32 count = 2;
+  // True when these are STRONGLY connected components, which is the case
+  // exactly when the input graph was directed.
+  bool strongly_connected = 3;
+  // Structured error message. Empty on success.
+  string error = 4;
 }
 
-// A minimum spanning tree/forest, emitted as a Graph so it composes downstream.
-message SpanningTreeResult {
-  Graph tree = 1;            // The spanning tree/forest as an undirected Graph.
-  double total_weight = 2;   // Sum of the weights of the selected edges.
-  int32 component_count = 3; // Number of trees in the forest (1 when the input is connected).
-  string error = 4;          // Structured error message; empty on success.
-}
-
-// Request for per-vertex centrality scores.
+// A request for per-vertex centrality scores.
 message CentralityRequest {
-  Graph graph = 1;   // The graph to score.
-  // Which measure to compute: "degree" (default), "betweenness", "closeness",
-  // "harmonic", or "eccentricity". Unknown values are rejected.
+  // The graph to score.
+  Graph graph = 1;
+  // Which measure to compute. One of, exactly and in lower case:
+  //   "degree"       — number of incident edges (in+out for a directed graph).
+  //   "betweenness"  — how many shortest paths run through the vertex.
+  //   "closeness"    — reciprocal of the summed distance FROM every vertex
+  //                    that can reach it (the standard incoming convention).
+  //   "eccentricity" — distance to the farthest vertex the vertex can REACH
+  //                    (the outgoing convention).
+  //   "harmonic"     — sum of the reciprocal distances FROM every vertex that
+  //                    can reach it (the standard incoming convention).
+  // Defaults to "degree" when empty. Any other value is rejected.
+  //
+  // Every measure except "degree" needs an all-pairs shortest-path
+  // computation, and therefore rejects negative edge weights, graphs above
+  // 600 vertices, and graphs whose vertex count times edge count exceeds
+  // 1200000.
   string measure = 2;
 }
 
 // One vertex's centrality score.
 message CentralityScore {
-  string node = 1;  // Vertex id.
-  double score = 2; // The centrality value under the requested measure.
+  // The vertex id.
+  string node = 1;
+  // The centrality value under the requested measure. Always finite: a vertex
+  // that can reach nothing (or that nothing reaches) scores 0 rather than
+  // infinity.
+  double score = 2;
 }
 
 // Per-vertex centrality scores.
 message CentralityResult {
-  repeated CentralityScore scores = 1; // One entry per vertex, sorted by vertex id.
-  string measure = 2;                  // The measure actually computed.
-  string error = 3;                    // Structured error message; empty on success.
+  // One entry per vertex, sorted by vertex id.
+  repeated CentralityScore scores = 1;
+  // The measure actually computed, which is "degree" when none was requested.
+  string measure = 2;
+  // Structured error message. Empty on success.
+  string error = 3;
 }
 
-// Request for PageRank scores.
+// A request for PageRank scores.
 message PageRankRequest {
-  Graph graph = 1;    // The graph to rank.
-  double damping = 2; // Damping factor in (0,1). Defaults to 0.85 when omitted/zero.
+  // The graph to rank.
+  Graph graph = 1;
+  // Damping factor, strictly between 0 and 1. Defaults to 0.85 when omitted
+  // or zero. Must be finite; NaN and infinity are rejected.
+  double damping = 2;
   // Field 3 was `tolerance`. It was removed before publication: the underlying
   // power iteration starts from a random vector, so a caller-tunable tolerance
   // made results irreproducible. The tolerance is now pinned internally.
@@ -135,57 +209,91 @@ message PageRankRequest {
 
 // One vertex's PageRank score.
 message PageRankScore {
-  string node = 1;  // Vertex id.
-  // PageRank value, rounded to 6 decimal places. Scores sum to 1 up to that
-  // rounding. See PageRankResult for why the rounding exists.
+  // The vertex id.
+  string node = 1;
+  // The PageRank value, rounded to 6 decimal places. See PageRankResult for
+  // why the rounding exists.
   double score = 2;
 }
 
 // PageRank scores for every vertex.
 //
 // The underlying power iteration starts from a randomly seeded vector, so raw
-// scores wobble in their last few digits between runs. Scores are therefore
-// computed to a pinned tolerance of 1e-14 and rounded to 6 decimal places,
-// which is far coarser than the residual error and makes the output of this
-// node reproducible for a given input.
+// scores wobble in their last digits between runs. Scores are therefore
+// computed to a pinned tolerance of 1e-14 and then rounded to 6 decimal
+// places, which is far coarser than the residual error and makes this node's
+// output reproducible for a given input. Because of that rounding the scores
+// sum to 1 only up to about 1e-6.
 message PageRankResult {
-  repeated PageRankScore scores = 1; // One entry per vertex, sorted by vertex id.
-  double damping = 2;                // The damping factor actually used.
-  string error = 3;                  // Structured error message; empty on success.
+  // One entry per vertex, sorted by vertex id.
+  repeated PageRankScore scores = 1;
+  // The damping factor actually used.
+  double damping = 2;
+  // Structured error message. Empty on success.
+  string error = 3;
 }
 
-// Whether the graph contains a cycle, and one concrete example if so.
+// Whether a graph contains a cycle, with one concrete example.
+//
+// Check `error` first: `has_cycle` is false both for an acyclic graph and for
+// a rejected request.
 message CycleResult {
-  bool has_cycle = 1;        // True when at least one cycle exists.
-  repeated string cycle = 2; // One example cycle as vertex ids; the first id is repeated last to close it.
-  int32 cycle_count = 3;     // Number of distinct cycles reported by the detector.
-  string error = 4;          // Structured error message; empty on success.
+  // True when the graph contains at least one cycle.
+  bool has_cycle = 1;
+  // One example cycle, as vertex ids, with the first id repeated at the end to
+  // close it. Empty when there is no cycle.
+  repeated string cycle = 2;
+  // A count of INDEPENDENT cycles, not of distinct cycles, and the two
+  // branches measure different things — do not compare this value across the
+  // `directed` flag:
+  //   directed   — the number of strongly connected components that contain a
+  //                cycle, plus the number of self-loops. A single component
+  //                holding many cycles counts once.
+  //   undirected — the circuit rank |E| - |V| + (number of components), plus
+  //                the number of self-loops. This is the size of the cycle
+  //                basis; a graph with 3 independent cycles has 7 distinct
+  //                cycles, and this field reports 3.
+  int32 cycle_count = 3;
+  // Structured error message. Empty on success.
+  string error = 4;
 }
 
-// Structural summary of a graph.
+// A structural summary of a graph.
 message GraphStats {
-  int32 node_count = 1;      // Number of vertices.
-  int32 edge_count = 2;      // Number of edges.
-  bool directed = 3;         // Whether the graph is directed.
-  double density = 4;        // Edges divided by the maximum possible edges (0 when fewer than 2 vertices).
-  bool is_dag = 5;           // True when the graph is directed and acyclic. Always false for undirected input.
-  bool is_connected = 6;     // True when every vertex is reachable (weak connectivity for directed input).
-  int32 component_count = 7; // Number of connected components (weakly connected for directed input).
-  double average_degree = 8; // Mean vertex degree (2*|E|/|V| undirected, |E|/|V| directed; 0 when no vertices).
-  int32 self_loop_count = 9; // Number of edges whose endpoints are the same vertex.
-  string error = 10;         // Structured error message; empty on success.
+  // The number of vertices.
+  int32 node_count = 1;
+  // The number of edges, including self-loops.
+  int32 edge_count = 2;
+  // Whether the graph is directed.
+  bool directed = 3;
+  // Edges divided by the maximum possible edges, excluding self-loops. Zero
+  // when the graph has fewer than 2 vertices.
+  double density = 4;
+  // True when the graph is directed AND acyclic. Always false for undirected
+  // input, regardless of whether it has cycles.
+  bool is_dag = 5;
+  // True when every vertex is reachable from every other, ignoring edge
+  // direction (weak connectivity). False for an empty graph.
+  bool is_connected = 6;
+  // The number of connected components, ignoring edge direction.
+  int32 component_count = 7;
+  // The mean vertex degree: 2*|E|/|V| undirected, |E|/|V| directed, counting a
+  // self-loop as 2 undirected or 1 directed. Zero when there are no vertices.
+  double average_degree = 8;
+  // The number of edges whose two endpoints are the same vertex.
+  int32 self_loop_count = 9;
+  // The sum of every edge weight, after the zero-means-one defaulting rule.
+  // Lets a MinimumSpanningTree result be weighed by piping it into Describe.
+  double total_weight = 11;
+  // Structured error message. Empty on success.
+  string error = 10;
 }
 
-// Request for the subgraph induced by a set of vertices.
+// A request for the subgraph induced by a set of vertices.
 message SubgraphRequest {
-  Graph graph = 1;           // The source graph.
-  repeated string nodes = 2; // Vertex ids to keep. Ids absent from the graph are rejected.
-}
-
-// The induced subgraph, emitted as a Graph so it composes downstream.
-message SubgraphResult {
-  Graph graph = 1;           // The induced subgraph: the kept vertices plus every edge with both endpoints kept.
-  int32 dropped_node_count = 2; // How many vertices from the source graph were excluded.
-  int32 dropped_edge_count = 3; // How many edges from the source graph were excluded.
-  string error = 4;          // Structured error message; empty on success.
+  // The source graph.
+  Graph graph = 1;
+  // The vertex ids to keep. Every id must exist in the graph; an unknown id is
+  // rejected rather than ignored. An empty list yields an empty graph.
+  repeated string nodes = 2;
 }

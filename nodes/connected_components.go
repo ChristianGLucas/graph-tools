@@ -20,6 +20,9 @@ func ConnectedComponents(ctx context.Context, ax axiom.Context, input *gen.Graph
 	if err != nil {
 		return &gen.ComponentsResult{Error: err.Error()}, nil
 	}
+	if err := ctx.Err(); err != nil {
+		return &gen.ComponentsResult{Error: "cancelled: " + err.Error()}, nil
+	}
 
 	var groups [][]string
 	if b.directed {

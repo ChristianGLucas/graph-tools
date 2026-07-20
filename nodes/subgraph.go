@@ -9,22 +9,29 @@ import (
 
 // Extracts the subgraph induced by a set of vertices: keeps exactly those
 // vertices and every edge whose endpoints are both kept. The result is returned
-// as a Graph so it can be piped straight into the other nodes in this package.
-// A requested vertex id that is not in the source graph is rejected rather than
-// silently ignored.
-func Subgraph(ctx context.Context, ax axiom.Context, input *gen.SubgraphRequest) (*gen.SubgraphResult, error) {
+// as a plain Graph — the package's canonical envelope — so it chains straight
+// into any graph-consuming node with an identity edge and no adapter. A
+// requested vertex id that is not in the source graph is rejected rather than
+// silently ignored; an empty selection yields an empty graph.
+func Subgraph(ctx context.Context, ax axiom.Context, input *gen.SubgraphRequest) (*gen.Graph, error) {
 	if input == nil {
-		return &gen.SubgraphResult{Error: "request is required"}, nil
+		return nil, errRequestRequired()
 	}
 	b, err := buildGraph(input.Graph)
 	if err != nil {
-		return &gen.SubgraphResult{Error: err.Error()}, nil
+		return nil, err
+	}
+	if len(input.Nodes) > maxNodes {
+		return nil, errTooManySelected(len(input.Nodes), maxNodes)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	keep := make(map[string]bool, len(input.Nodes))
 	for _, id := range input.Nodes {
 		if _, ok := b.idOf[id]; !ok {
-			return &gen.SubgraphResult{Error: "unknown node id " + quote(id)}, nil
+			return nil, errUnknownNode(id)
 		}
 		keep[id] = true
 	}
@@ -45,10 +52,5 @@ func Subgraph(ctx context.Context, ax axiom.Context, input *gen.SubgraphRequest)
 			})
 		}
 	}
-
-	return &gen.SubgraphResult{
-		Graph:            out,
-		DroppedNodeCount: int32(len(b.ids) - len(out.Nodes)),
-		DroppedEdgeCount: int32(b.edgeCount - len(out.Edges)),
-	}, nil
+	return out, nil
 }

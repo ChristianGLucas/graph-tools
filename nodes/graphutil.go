@@ -10,6 +10,7 @@ import (
 	"gonum.org/v1/gonum/graph/path"
 	"gonum.org/v1/gonum/graph/simple"
 	"gonum.org/v1/gonum/graph/topo"
+	"google.golang.org/protobuf/proto"
 
 	gen "christiangeorgelucas/graph-tools/gen"
 )
@@ -25,12 +26,34 @@ const (
 	maxNodes = 20000
 	maxEdges = 200000
 
-	// maxQuadraticNodes bounds the all-pairs measures (betweenness, closeness,
-	// harmonic, eccentricity), whose time is O(V*E) and whose memory is O(V^2).
+	// maxPageRankNodes states the PageRank vertex limit explicitly rather than
+	// leaving it implicit. It equals maxNodes because PageRank uses gonum's
+	// SPARSE power iteration, which is O(V+E): at 20000 vertices it completes
+	// in ~25ms allocating ~8MB, so no tighter bound is warranted. (The DENSE
+	// variant would allocate a V*V matrix — 3.2GB at this limit — which is why
+	// the sparse one is used.)
+	maxPageRankNodes = maxNodes
+
+	// maxQuadraticNodes bounds the VERTEX count for the all-pairs measures
+	// (betweenness, closeness, harmonic, eccentricity).
 	maxQuadraticNodes = 600
 
-	// maxPageRankNodes bounds PageRank, whose power iteration is O(k*(V+E)).
-	maxPageRankNodes = 20000
+	// maxQuadraticProduct bounds the actual COST of the all-pairs measures,
+	// which is O(V*E) in time. Bounding V alone is not enough: a complete
+	// 600-vertex graph has 179700 edges, which passes both the vertex and the
+	// edge cap while costing over a minute of CPU. This product cap is what
+	// keeps the worst admissible all-pairs input to roughly a second.
+	maxQuadraticProduct = 1200000
+
+	// maxIDBytes / maxLabelBytes bound the per-vertex string sizes. Counting
+	// elements alone leaves the byte dimension unbounded: 20000 vertices with
+	// 10 KiB ids is a 381 MiB payload that every element-based cap accepts.
+	maxIDBytes    = 256
+	maxLabelBytes = 1024
+
+	// maxEncodedBytes bounds the whole request, as a backstop for any byte
+	// dimension the per-field caps do not model.
+	maxEncodedBytes = 8 << 20 // 8 MiB
 )
 
 // built is the validated, canonical in-memory form of a gen.Graph.
@@ -46,9 +69,14 @@ type built struct {
 	nameOf    map[int64]string  // gonum id -> caller id
 	labelOf   map[string]string // caller id -> label
 	selfLoops int               // count of edges whose endpoints are equal
-	edgeCount int               // total edges in the input, including self-loops
-	hasNeg    bool              // true when any resolved edge weight is negative
-	weighted  bool              // true when any resolved edge weight differs from 1
+	// selfLoopOf counts self-loops per vertex, so the degree measures can apply
+	// the standard "a self-loop adds 2 to a vertex's degree" convention even
+	// though self-loops are held outside the gonum structures.
+	selfLoopOf  map[string]int
+	totalWeight float64 // sum of every resolved edge weight
+	edgeCount   int     // total edges in the input, including self-loops
+	hasNeg      bool    // true when any resolved edge weight is negative
+	weighted    bool    // true when any resolved edge weight differs from 1
 
 	// wdg/wug hold the non-self-loop edges with their weights. Exactly one is
 	// non-nil, matching `directed`.
@@ -82,6 +110,9 @@ func buildGraph(g *graphInput) (*built, error) {
 		return nil, fmt.Errorf("graph is required")
 	}
 	// Bounds are enforced on the RAW input, before any allocation.
+	if n := proto.Size(g); n > maxEncodedBytes {
+		return nil, fmt.Errorf("graph is %d bytes encoded, exceeding the limit of %d", n, maxEncodedBytes)
+	}
 	if len(g.Nodes) > maxNodes {
 		return nil, fmt.Errorf("graph has %d nodes, exceeding the limit of %d", len(g.Nodes), maxNodes)
 	}
@@ -90,11 +121,12 @@ func buildGraph(g *graphInput) (*built, error) {
 	}
 
 	b := &built{
-		directed: g.Directed,
-		idOf:     make(map[string]int64, len(g.Nodes)),
-		nameOf:   make(map[int64]string, len(g.Nodes)),
-		labelOf:  make(map[string]string, len(g.Nodes)),
-		ids:      make([]string, 0, len(g.Nodes)),
+		directed:   g.Directed,
+		idOf:       make(map[string]int64, len(g.Nodes)),
+		nameOf:     make(map[int64]string, len(g.Nodes)),
+		labelOf:    make(map[string]string, len(g.Nodes)),
+		selfLoopOf: make(map[string]int),
+		ids:        make([]string, 0, len(g.Nodes)),
 	}
 
 	seen := make(map[string]bool, len(g.Nodes))
@@ -104,6 +136,13 @@ func buildGraph(g *graphInput) (*built, error) {
 		}
 		if n.Id == "" {
 			return nil, fmt.Errorf("node id must not be empty")
+		}
+		if len(n.Id) > maxIDBytes {
+			return nil, fmt.Errorf("node id is %d bytes, exceeding the limit of %d", len(n.Id), maxIDBytes)
+		}
+		if len(n.Label) > maxLabelBytes {
+			return nil, fmt.Errorf("label on node %q is %d bytes, exceeding the limit of %d",
+				n.Id, len(n.Label), maxLabelBytes)
 		}
 		if seen[n.Id] {
 			return nil, fmt.Errorf("duplicate node id %q", n.Id)
@@ -171,6 +210,7 @@ func buildGraph(g *graphInput) (*built, error) {
 		// past float64 range and gonum's relaxation step then silently fails to
 		// reach the node, which surfaces as a bogus "unreachable".
 		weightMagnitude += math.Abs(w)
+		b.totalWeight += w
 		if w != 1 {
 			b.weighted = true
 		}
@@ -190,6 +230,7 @@ func buildGraph(g *graphInput) (*built, error) {
 			// and are irrelevant to shortest paths, spanning trees and
 			// centrality, so they are excluded from the gonum structures.
 			b.selfLoops++
+			b.selfLoopOf[e.From]++
 			continue
 		}
 
@@ -287,11 +328,17 @@ func (b *built) shortestFrom(from int64) (path.Shortest, string) {
 	return sp, ""
 }
 
-// requireQuadraticBudget guards the all-pairs measures.
+// requireQuadraticBudget guards the all-pairs measures on BOTH dimensions that
+// drive their cost. The vertex cap alone is not a cost bound, because time is
+// O(V*E) and a dense graph can sit under the vertex cap while costing minutes.
 func (b *built) requireQuadraticBudget(op string) error {
 	if len(b.ids) > maxQuadraticNodes {
 		return fmt.Errorf("%s requires an all-pairs computation and is limited to %d nodes; graph has %d",
 			op, maxQuadraticNodes, len(b.ids))
+	}
+	if product := len(b.ids) * b.edgeCount; product > maxQuadraticProduct {
+		return fmt.Errorf("%s costs O(nodes*edges) and is limited to a product of %d; graph has %d nodes * %d edges = %d",
+			op, maxQuadraticProduct, len(b.ids), b.edgeCount, product)
 	}
 	return nil
 }
@@ -315,4 +362,45 @@ func (b *built) weakComponents() [][]string {
 func roundTo(x float64, decimals int) float64 {
 	scale := math.Pow(10, float64(decimals))
 	return math.Round(x*scale) / scale
+}
+
+// The two graph-emitting nodes return the bare `Graph` envelope so their output
+// composes with an identity edge. Graph has no `error` field, so those nodes
+// report a rejected request as a Go error, which the platform surfaces as a
+// node failure rather than as a silently empty graph.
+
+func errRequestRequired() error { return fmt.Errorf("request is required") }
+
+func errUnknownNode(id string) error { return fmt.Errorf("unknown node id %s", quote(id)) }
+
+func errUndirectedRequired(node string) error {
+	return fmt.Errorf("%s requires an undirected graph; set `directed` to false", node)
+}
+
+func errTooManySelected(n, limit int) error {
+	return fmt.Errorf("selection lists %d nodes, exceeding the limit of %d", n, limit)
+}
+
+// transposedWeightedGraph returns the graph with every edge reversed, as a
+// deterministic weighted view. Used by the eccentricity measure to convert
+// gonum's incoming-path convention into the outgoing one this package
+// documents. For an undirected graph the transpose is the graph itself.
+func (b *built) transposedWeightedGraph() graph.Graph {
+	if !b.directed {
+		return orderedWU{b.wug}
+	}
+	t := simple.NewWeightedDirectedGraph(0, math.Inf(1))
+	for _, id := range b.ids {
+		t.AddNode(simple.Node(b.idOf[id]))
+	}
+	edges := orderedWD{b.wdg}.WeightedEdges()
+	for edges.Next() {
+		e := edges.WeightedEdge()
+		t.SetWeightedEdge(simple.WeightedEdge{
+			F: simple.Node(e.To().ID()),
+			T: simple.Node(e.From().ID()),
+			W: e.Weight(),
+		})
+	}
+	return orderedWD{t}
 }

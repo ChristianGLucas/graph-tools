@@ -19,6 +19,9 @@ func ShortestPath(ctx context.Context, ax axiom.Context, input *gen.ShortestPath
 	if err != nil {
 		return &gen.ShortestPathResult{Error: err.Error()}, nil
 	}
+	if err := ctx.Err(); err != nil {
+		return &gen.ShortestPathResult{Error: "cancelled: " + err.Error()}, nil
+	}
 	fromID, ok := b.idOf[input.From]
 	if !ok {
 		return &gen.ShortestPathResult{Error: "unknown source node id " + quote(input.From)}, nil

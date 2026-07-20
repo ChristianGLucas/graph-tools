@@ -21,6 +21,9 @@ func TopologicalSort(ctx context.Context, ax axiom.Context, input *gen.Graph) (*
 	if err != nil {
 		return &gen.TopoSortResult{Error: err.Error()}, nil
 	}
+	if err := ctx.Err(); err != nil {
+		return &gen.TopoSortResult{Error: "cancelled: " + err.Error()}, nil
+	}
 	if !b.directed {
 		return &gen.TopoSortResult{Error: "TopologicalSort requires a directed graph; set `directed` to true"}, nil
 	}

@@ -12,23 +12,30 @@ import (
 )
 
 // Selects the cheapest set of edges that connects every vertex without forming
-// a cycle, using Kruskal's algorithm. The result is returned as a Graph so it
-// can be piped straight into the other nodes in this package. When the input is
-// disconnected the result is a minimum spanning forest and component_count is
-// greater than one. Requires an undirected graph.
-func MinimumSpanningTree(ctx context.Context, ax axiom.Context, input *gen.Graph) (*gen.SpanningTreeResult, error) {
+// a cycle, using Kruskal's algorithm. The result is returned as a plain Graph —
+// the package's canonical envelope — so it feeds straight into Describe,
+// DetectCycle, ConnectedComponents or TopologicalSort with an identity edge and
+// no adapter. Pipe it into Describe to recover the tree's total weight. When
+// the input is disconnected the result is a minimum spanning forest rather than
+// an error. Requires an undirected graph.
+func MinimumSpanningTree(ctx context.Context, ax axiom.Context, input *gen.Graph) (*gen.Graph, error) {
 	b, err := buildGraph(input)
 	if err != nil {
-		return &gen.SpanningTreeResult{Error: err.Error()}, nil
+		// Graph carries no error field, so a rejected request surfaces as a Go
+		// error and the platform reports it as a node failure.
+		return nil, err
 	}
 	if b.directed {
-		return &gen.SpanningTreeResult{Error: "MinimumSpanningTree requires an undirected graph; set `directed` to false"}, nil
+		return nil, errUndirectedRequired("MinimumSpanningTree")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	// Kruskal panics if dst already holds nodes that exist in g; it populates
 	// dst with every vertex itself, including isolated ones.
 	dst := simple.NewWeightedUndirectedGraph(0, math.Inf(1))
-	total := path.Kruskal(dst, b.weightedUndirectedView())
+	path.Kruskal(dst, b.weightedUndirectedView())
 
 	tree := &gen.Graph{Directed: false}
 	for _, id := range b.ids {
@@ -55,10 +62,5 @@ func MinimumSpanningTree(ctx context.Context, ax axiom.Context, input *gen.Graph
 			ExplicitZeroWeight: w == 0,
 		})
 	}
-
-	return &gen.SpanningTreeResult{
-		Tree:           tree,
-		TotalWeight:    total,
-		ComponentCount: int32(len(b.weakComponents())),
-	}, nil
+	return tree, nil
 }
