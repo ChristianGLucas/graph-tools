@@ -9,9 +9,10 @@ from here?*, *which node matters most?*, *is there a dependency cycle?* — over
 single shared `Graph` envelope.
 
 The algorithms come from [gonum/graph](https://pkg.go.dev/gonum.org/v1/gonum/graph)
-(BSD-3-Clause), which owns every algorithmically hard part: Dijkstra,
-Bellman-Ford, Tarjan's SCC, Kruskal, Brandes' betweenness and the PageRank power
-iteration.
+(BSD-3-Clause), which owns the algorithmically hard parts: Dijkstra,
+Bellman-Ford, Tarjan's SCC, Kruskal and Brandes' betweenness. The one exception
+is the PageRank recurrence, which this package runs itself so that it can fix
+the iteration's starting vector — see *Deterministic output* below.
 
 ## The `Graph` envelope
 
@@ -41,7 +42,7 @@ set `explicit_zero_weight`, which is how you express a genuine zero-cost edge.
 | `ConnectedComponents` | `Graph` → `ComponentsResult` | Connected components (undirected) or strongly connected components (directed, Tarjan). |
 | `MinimumSpanningTree` | `Graph` → **`Graph`** | Cheapest spanning tree/forest via Kruskal. Undirected only. |
 | `Centrality` | `CentralityRequest` → `CentralityResult` | Per-vertex `degree`, `betweenness`, `closeness`, `harmonic` or `eccentricity`. |
-| `PageRank` | `PageRankRequest` → `PageRankResult` | Link-importance ranking; scores sum to 1 up to rounding. Damping defaults to 0.85, max 0.99. |
+| `PageRank` | `PageRankRequest` → `PageRankResult` | Link-importance ranking; scores sum to 1 up to 6-decimal rounding. Damping defaults to 0.85, max 0.99. |
 | `DetectCycle` | `Graph` → `CycleResult` | Whether a cycle exists, how many are independent, and one concrete example. |
 | `Describe` | `Graph` → `GraphStats` | Counts, density, mean degree, self-loops, total weight, connectivity, components, is-DAG. |
 | `Subgraph` | `SubgraphRequest` → **`Graph`** | The subgraph induced by a set of vertices. |
@@ -49,9 +50,10 @@ set `explicit_zero_weight`, which is how you express a genuine zero-cost edge.
 ## Composing these nodes in a flow
 
 `MinimumSpanningTree` and `Subgraph` return a **top-level `Graph`**, and
-`TopologicalSort`, `ConnectedComponents`, `DetectCycle` and `Describe` take a
-top-level `Graph`. Those pairings connect with an **identity edge and no
-adapter** — for example `Subgraph → MinimumSpanningTree → Describe`.
+`TopologicalSort`, `ConnectedComponents`, `DetectCycle`, `Describe` and
+`MinimumSpanningTree` itself take a top-level `Graph`. Those pairings connect
+with an **identity edge and no adapter** — for example
+`Subgraph → MinimumSpanningTree → Describe`.
 
 This shape is deliberate. A nested protobuf message field cannot currently be
 mapped across a flow edge, so a result type that merely *contained* a `Graph`
@@ -64,7 +66,7 @@ The nodes that take a request wrapper (`ShortestPath`, `Distances`,
 graph — a source vertex, a measure, a vertex set — so in a flow their graph comes
 from flow input or config rather than from an upstream edge. Concretely, the
 pairs that compose with no adapter are
-`{MinimumSpanningTree, Subgraph} → {Describe, DetectCycle, ConnectedComponents, TopologicalSort}`,
+`{MinimumSpanningTree, Subgraph} → {Describe, DetectCycle, ConnectedComponents, TopologicalSort, MinimumSpanningTree}`,
 minus `MinimumSpanningTree → TopologicalSort`, since a spanning tree is always
 undirected and `TopologicalSort` requires a directed graph.
 
@@ -95,7 +97,8 @@ after; it is cross-checked against gonum's own implementation in the tests.
 The same input always produces the same output — asserted by re-invoking each
 node many times, including across randomly generated graphs and on a known
 rounding-boundary graph. Because scores are rounded to 6 decimals, PageRank
-scores sum to 1 only up to about `1e-6`.
+scores sum to 1 only up to that rounding — at most `5e-7` of drift per vertex,
+so about `1e-6` on a small graph and up to ~`0.01` on a 20 000-vertex one.
 
 **Malformed input is rejected, never guessed.** Empty, over-long, duplicate or
 control-character-bearing vertex ids; edges pointing at vertices that do not
@@ -122,15 +125,17 @@ input silently selects a far more expensive algorithm:
 PageRank's damping factor is capped at 0.99 for the same family of reason: the
 iteration count grows without limit as damping approaches 1.
 
-The three paths whose cost is not near-linear in the input — PageRank, the
-all-pairs centrality measures, and the negative-weight (Bellman-Ford) shortest
-path search — additionally run under a 20-second wall-clock budget and return a
-structured error if it is exceeded, so a bound that turns out to be
-mis-calibrated for some input shape degrades into an error rather than a hang.
-Those calls also return promptly when the request is cancelled, rather than
-waiting for a library call that takes no context and cannot be interrupted. The
-remaining nodes are near-linear and bounded by the input caps alone — they
-measure under half a second at the largest admissible payload.
+The paths whose cost is not near-linear in the input run under a 20-second
+wall-clock budget and return a structured error if it is exceeded, so a bound
+that turns out to be mis-calibrated for some input shape degrades into an error
+rather than a hang. Those calls also return promptly when the request is
+cancelled, rather than waiting for a library call that takes no context and
+cannot be interrupted. The budgeted paths are PageRank, the all-pairs centrality
+measures, the negative-weight (Bellman-Ford) shortest-path search, and
+`Distances`. The remaining nodes are near-linear and bounded by the input caps
+alone; every node measures well under a second at the largest admissible
+payload, including on large-diameter graphs where a naive hop-count
+reconstruction would go quadratic.
 
 **Errors inside a flow.** The eight nodes with a result message report a
 rejected request in band, with an HTTP 200 — so a flow step reports success and
@@ -162,7 +167,7 @@ Every node has golden tests with hand-computed expected values, plus
 - exhaustive search over all `|V|-1` edge subsets, cross-checked against `MinimumSpanningTree`;
 - the closed forms for harmonic, closeness and eccentricity centrality, on directed and asymmetric graphs as well as symmetric ones, plus betweenness cross-checked against networkx's unnormalised values;
 - PageRank's exact `1/n` stationary distribution on a directed cycle, and the exact `0.9 / 0.05 / 0.05` distribution of a self-loop graph;
-- Euler's circuit-rank formula `|E| - |V| + components`, cross-checked against `DetectCycle`;
+- Euler's circuit-rank formula `|E| - |V| + components` (counting non-self-loop edges), cross-checked against `DetectCycle`;
 - validation that each returned cycle is a genuine closed walk, that each topological order really does place every edge's tail before its head, and that `Describe.average_degree` is exactly the mean of `Centrality`'s per-vertex degree scores.
 
 Run them with `axiom test`.
@@ -176,5 +181,7 @@ Direct runtime dependencies are `gonum.org/v1/gonum` (BSD-3-Clause) and
 links the Axiom sidecar's transport stack: `google.golang.org/grpc` and
 `google.golang.org/genproto/googleapis/rpc` (Apache-2.0), and
 `golang.org/x/{net,sys,text}` (BSD-3-Clause). There is no copyleft-licensed code
-anywhere in the tree. Full licence texts are reproduced in
+anywhere in the deployed build closure — the packages actually linked into the
+shipped binary. Full licence texts, and a note on why the claim is scoped to the
+build closure rather than the whole module graph, are in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

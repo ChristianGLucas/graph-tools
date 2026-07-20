@@ -15,9 +15,11 @@ import (
 // honoured, since a self-loop is a genuine rank sink that changes every score.
 // An undirected graph is treated as a directed graph with each edge present in
 // both directions. Edge weights are ignored — the ranking is computed on the
-// link topology only. Scores sum to 1 and are rounded to 6 decimal places,
-// which makes the result reproducible despite the underlying iteration
-// starting from a randomly seeded vector.
+// link topology only. Scores sum to 1 and are rounded to 6 decimal places. The
+// power iteration runs from a fixed uniform start vector and accumulates in a
+// fixed order, so the result is bit-for-bit reproducible before rounding as
+// well as after — see pagerank_iter.go for why the recurrence is run here
+// rather than by gonum.
 func PageRank(ctx context.Context, ax axiom.Context, input *gen.PageRankRequest) (*gen.PageRankResult, error) {
 	if input == nil {
 		return &gen.PageRankResult{Error: "request is required"}, nil
@@ -70,12 +72,16 @@ func PageRank(ctx context.Context, ax axiom.Context, input *gen.PageRankRequest)
 	// oscillates and plateaus near the float64 noise floor, so a 1e-14 target
 	// may never be met. 1e-12 is still six orders of magnitude finer than the
 	// 6-decimal rounding applied below.
-	const pageRankTolerance = 1e-12
+	//
+	// The L1 residual is compared against this directly in deterministicPageRank.
+	const pageRankTolerance = 1e-13 // per vertex; see deterministicPageRank
 	const pageRankDecimals = 6
 
-	// PageRankSparse, NOT PageRank: the dense variant allocates a V*V float64
-	// matrix, which at the vertex limit is over 3 GB and OOM-kills the process.
-	// The sparse variant is O(V+E) and returns the same answer.
+	// deterministicPageRank, not gonum's network.PageRank/PageRankSparse: gonum
+	// seeds its iteration from a random vector, which made this node's output
+	// nondeterministic at rounding boundaries. The in-package iteration is also
+	// sparse — O(V+E) per step — so the dense-matrix blow-up gonum's PageRank
+	// would incur at the vertex limit does not arise either.
 	view := b.pageRankView(input.Graph)
 	ids := make([]int64, 0, len(b.ids))
 	for _, id := range b.ids {

@@ -498,3 +498,105 @@ func TestPageRankMatchesGonum(t *testing.T) {
 		}
 	}
 }
+
+// TestPageRankConvergesOnStarGraphs is the regression guard for a defect
+// introduced by the in-package power iteration: the convergence test compared
+// an ABSOLUTE L1 residual against a size-independent constant. The residual of
+// a sum over n vertices has a floating-point noise floor that GROWS with n, so
+// on a hub-and-spoke star — the most common real graph shape — the residual
+// plateaus above the target and never meets it. The iteration then burned its
+// whole cap and returned an error for a graph with a perfectly good answer:
+// at damping 0.99 the smallest failing star had just 374 vertices.
+func TestPageRankConvergesOnStarGraphs(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+
+	star := func(n int) *gen.Graph {
+		g := &gen.Graph{Directed: true}
+		for i := 0; i < n; i++ {
+			g.Nodes = append(g.Nodes, &gen.GraphNode{Id: "n" + itoa(i)})
+		}
+		// Every spoke points at the hub, and the hub points back at each spoke.
+		for i := 1; i < n; i++ {
+			g.Edges = append(g.Edges, &gen.GraphEdge{From: "n" + itoa(i), To: "n0"})
+			g.Edges = append(g.Edges, &gen.GraphEdge{From: "n0", To: "n" + itoa(i)})
+		}
+		return g
+	}
+
+	for _, n := range []int{100, 374, 1000, 5000, 20000} {
+		for _, d := range []float64{0.85, 0.99} {
+			start := time.Now()
+			got, err := nodes.PageRank(ctx, ax, &gen.PageRankRequest{Graph: star(n), Damping: d})
+			elapsed := time.Since(start)
+			if err != nil {
+				t.Fatalf("star n=%d d=%v: unexpected Go error: %v", n, d, err)
+			}
+			if got.Error != "" {
+				t.Fatalf("star n=%d d=%v FAILED TO CONVERGE: %s", n, d, got.Error)
+			}
+			if elapsed > 20*time.Second {
+				t.Errorf("star n=%d d=%v took %v", n, d, elapsed)
+			}
+
+			// Sanity: scores sum to 1, and the hub must outrank every spoke.
+			sum, hub := 0.0, 0.0
+			maxSpoke := 0.0
+			for _, s := range got.Scores {
+				sum += s.Score
+				if s.Node == "n0" {
+					hub = s.Score
+				} else if s.Score > maxSpoke {
+					maxSpoke = s.Score
+				}
+			}
+			// Each score is rounded to 6 decimals, so the sum can drift by up
+			// to 5e-7 per vertex. That is the documented bound.
+			if tolSum := 5e-7 * float64(n); !nearly(sum, 1, tolSum) {
+				t.Errorf("star n=%d d=%v: scores sum to %v, want 1 within %v", n, d, sum, tolSum)
+			}
+			if hub <= maxSpoke {
+				t.Errorf("star n=%d d=%v: hub %v must outrank every spoke (max %v)", n, d, hub, maxSpoke)
+			}
+			// Every spoke is structurally identical, so they must all score the
+			// same — a strong check that the iteration really converged.
+			for _, s := range got.Scores {
+				if s.Node != "n0" && s.Score != maxSpoke {
+					t.Errorf("star n=%d d=%v: spoke %s scored %v, but spokes are symmetric (%v)",
+						n, d, s.Node, s.Score, maxSpoke)
+					break
+				}
+			}
+		}
+	}
+}
+
+// A long directed chain is the other shape whose residual behaves badly.
+func TestPageRankConvergesOnLongChain(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	const n = 20000
+	g := &gen.Graph{Directed: true}
+	for i := 0; i < n; i++ {
+		g.Nodes = append(g.Nodes, &gen.GraphNode{Id: "n" + itoa(i)})
+	}
+	for i := 0; i+1 < n; i++ {
+		g.Edges = append(g.Edges, &gen.GraphEdge{From: "n" + itoa(i), To: "n" + itoa(i+1)})
+	}
+	start := time.Now()
+	got, err := nodes.PageRank(ctx, ax, &gen.PageRankRequest{Graph: g, Damping: 0.99})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if got.Error != "" {
+		t.Fatalf("a 20000-vertex chain failed to converge: %s", got.Error)
+	}
+	if el := time.Since(start); el > 20*time.Second {
+		t.Errorf("chain took %v", el)
+	}
+	sum := 0.0
+	for _, s := range got.Scores {
+		sum += s.Score
+	}
+	if tolSum := 5e-7 * float64(n); !nearly(sum, 1, tolSum) {
+		t.Errorf("scores sum to %v, want 1 within %v", sum, tolSum)
+	}
+}

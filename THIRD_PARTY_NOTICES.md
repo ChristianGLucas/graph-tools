@@ -8,7 +8,16 @@ disclaimer to be reproduced with the distribution. Their full licence texts
 follow.
 
 There is no copyleft-licensed code (GPL, LGPL, AGPL, MPL, CDDL, EPL, SSPL) in
-this package or anywhere in its dependency tree.
+this package or anywhere in the DEPLOYED BUILD CLOSURE — the set of packages
+actually linked into the shipped binary, enumerated in the table below.
+
+That is deliberately scoped to the build closure rather than to the whole module
+graph. Go's module graph transitively includes gonum's own plotting and tooling
+requirements (`gonum.org/v1/plot`, `github.com/golang/freetype`, and others).
+None of them are downloaded or linked — `go list -deps ./...` returns zero
+packages from any of them — but at least one, golang/freetype, is dual-licensed
+FreeType-or-GPLv2, so a claim about "the entire module graph" would not be
+defensible. The claim above is about what ships, and it is exhaustive for that.
 
 Note on the Go PATENTS grants: `golang.org/x/net`, `golang.org/x/sys`,
 `golang.org/x/text` and `google.golang.org/protobuf` each ship an additional
@@ -22,7 +31,7 @@ additional permission, not a condition of BSD-3-Clause redistribution.
 | Component | Version | Licence | Role |
 |---|---|---|---|
 | gonum.org/v1/gonum | v0.17.0 | BSD-3-Clause | graph algorithms (direct dependency) |
-| ├─ Cephes (Stephen L. Moshier) | vendored in gonum | BSD-3-Clause | reproduced for completeness of gonum's own third-party notices; not itself in this build closure |
+| ├─ Cephes (Stephen L. Moshier) | vendored in gonum | BSD-3-Clause | Cephes-derived complex-sqrt code in `gonum/internal/cmplx64/sqrt.go` — IS in the deployed build closure |
 | ├─ The Go Authors | vendored in gonum | BSD-3-Clause | internal float32/complex64 helpers |
 | google.golang.org/protobuf | v1.36.11 | BSD-3-Clause (+ PATENTS) | message encoding (direct dependency) |
 | google.golang.org/grpc | v1.78.0 | Apache-2.0 (+ NOTICE) | Axiom sidecar transport (indirect) |

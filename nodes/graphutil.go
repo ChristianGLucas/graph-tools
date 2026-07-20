@@ -28,11 +28,10 @@ const (
 	maxEdges = 200000
 
 	// maxPageRankNodes states the PageRank vertex limit explicitly rather than
-	// leaving it implicit. It equals maxNodes because PageRank uses gonum's
-	// SPARSE power iteration, which is O(V+E): at 20000 vertices it completes
-	// in ~25ms allocating ~8MB, so no tighter bound is warranted. (The DENSE
-	// variant would allocate a V*V matrix — 3.2GB at this limit — which is why
-	// the sparse one is used.)
+	// leaving it implicit. It equals maxNodes because the in-package power
+	// iteration (see pagerank_iter.go) is O(V+E) per step over adjacency lists:
+	// at 20000 vertices a full run completes in tens of milliseconds. No dense
+	// V*V matrix is ever allocated.
 	maxPageRankNodes = maxNodes
 
 	// maxPageRankDamping bounds the iteration count. PageRank needs about

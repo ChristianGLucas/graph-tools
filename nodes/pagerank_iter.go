@@ -26,7 +26,17 @@ import (
 // the PageRank recurrence is a dozen lines of arithmetic and is reproduced here
 // only to control its starting conditions. It is checked against
 // network.PageRankSparse and against closed-form answers in the tests.
-const pageRankMaxIterations = 20000
+const (
+	// pageRankMaxIterations is a hard backstop. The analytic rate needs about
+	// log(tol)/log(damping) steps — under 3000 at the maximum permitted damping
+	// of 0.99 — so a genuinely converging input never approaches this.
+	pageRankMaxIterations = 5000
+
+	// pageRankStagnationLimit accepts the result once the residual has stopped
+	// improving for this many consecutive iterations, which means it has hit
+	// the floating-point floor and further work cannot refine the answer.
+	pageRankStagnationLimit = 20
+)
 
 // deterministicPageRank returns the PageRank of g by power iteration from the
 // uniform vector 1/n. `ids` must be the ascending gonum ids of g's vertices.
@@ -67,6 +77,9 @@ func deterministicPageRank(g *loopDirected, ids []int64, damping, tol float64) (
 
 	teleport := (1 - damping) / float64(n)
 
+	prevDiff := math.Inf(1)
+	stagnant := 0
+
 	for iter := 0; iter < pageRankMaxIterations; iter++ {
 		// Rank held by vertices with no outgoing edges is redistributed evenly.
 		var dangling float64
@@ -96,16 +109,41 @@ func deterministicPageRank(g *loopDirected, ids []int64, damping, tol float64) (
 		}
 		cur, next = next, cur
 
-		if diff < tol {
-			scores := make(map[int64]float64, n)
-			for i, id := range sorted {
-				scores[id] = cur[i]
-			}
-			return scores, nil
+		// The convergence target is PER VERTEX, not a total. An L1 residual
+		// summed over n vertices has a floating-point noise floor that grows
+		// with n, so comparing it against a size-independent constant is
+		// unreachable on large graphs: a 20000-vertex star plateaus around
+		// 5e-11 and would never meet a fixed 1e-12 target, spinning out the
+		// whole iteration cap and failing on a graph that has a perfectly good
+		// answer. Scaling by n keeps the accuracy requirement fixed per score
+		// — far finer than the 6-decimal rounding applied downstream.
+		if diff <= tol*float64(n) {
+			return collect(sorted, cur), nil
 		}
+
+		// Belt and braces: once the residual stops improving it has hit the
+		// floating-point floor and further iterations cannot do better, so
+		// accept rather than spin. Deterministic, like everything else here.
+		if iter > 0 && diff >= prevDiff {
+			stagnant++
+			if stagnant >= pageRankStagnationLimit {
+				return collect(sorted, cur), nil
+			}
+		} else {
+			stagnant = 0
+		}
+		prevDiff = diff
 	}
 
 	return nil, fmt.Errorf(
-		"PageRank did not converge within %d iterations; try a smaller damping factor",
-		pageRankMaxIterations)
+		"PageRank did not converge within %d iterations", pageRankMaxIterations)
+}
+
+// collect maps the score vector back onto gonum ids.
+func collect(sorted []int64, v []float64) map[int64]float64 {
+	scores := make(map[int64]float64, len(sorted))
+	for i, id := range sorted {
+		scores[id] = v[i]
+	}
+	return scores
 }

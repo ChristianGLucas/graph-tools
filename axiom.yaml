@@ -1,5 +1,5 @@
 name: christiangeorgelucas/graph-tools
-version: 0.5.0
+version: 0.6.0
 language: go
 description: Composable graph-algorithm nodes — shortest path, distances, topological sort, connected components, minimum spanning tree, centrality, PageRank, cycle detection, structural stats and induced subgraphs — over a single canonical Graph envelope, wrapping the BSD-3-Clause gonum/graph library. Every node is stateless, deterministic for a given input, and rejects malformed graphs with a structured error rather than guessing.
 license: MIT
@@ -25,7 +25,7 @@ nodes:
     - name: TopologicalSort
       input: Graph
       output: TopoSortResult
-      description: Orders the vertices of a directed acyclic graph so that every edge points from an earlier vertex to a later one — the build, install or task order of a dependency graph. Ties are broken by vertex id so the ordering is stable across runs. Requires a directed graph, and reports is_dag=false with an empty order when a cycle (including a self-loop) makes ordering impossible.
+      description: Orders the vertices of a directed acyclic graph so that every edge points from an earlier vertex to a later one — the build, install or task order of a dependency graph. The ordering is a deterministic function of the input, so the same graph always yields the same order (though not necessarily the lexicographically smallest valid one). Requires a directed graph, and reports is_dag=false with an empty order when a cycle (including a self-loop) makes ordering impossible.
     - name: ConnectedComponents
       input: Graph
       output: ComponentsResult
@@ -41,7 +41,7 @@ nodes:
     - name: PageRank
       input: PageRankRequest
       output: PageRankResult
-      description: Ranks vertices by link importance using the PageRank power iteration — a vertex matters when vertices that matter point at it. Honours self-loops and treats an undirected graph as bidirectional. Scores sum to 1 (up to the rounding) and are rounded to 6 decimal places. The power iteration runs from a fixed uniform start vector in a fixed accumulation order, so results are bit-for-bit reproducible. Damping defaults to 0.85 and must be at most 0.99, since convergence slows without bound as it approaches 1. Edge weights are ignored; only the link topology counts.
+      description: Ranks vertices by link importance using the PageRank power iteration — a vertex matters when vertices that matter point at it. Honours self-loops and treats an undirected graph as bidirectional. Scores are rounded to 6 decimal places and sum to 1 up to that rounding (at most 5e-7 of drift per vertex). The power iteration runs from a fixed uniform start vector in a fixed accumulation order, so results are bit-for-bit reproducible. Damping defaults to 0.85 and must be at most 0.99, since convergence slows without bound as it approaches 1. Edge weights are ignored; only the link topology counts.
     - name: DetectCycle
       input: Graph
       output: CycleResult

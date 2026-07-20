@@ -700,3 +700,89 @@ func TestNegativeWeightCostIsBoundedByTheProduct(t *testing.T) {
 		t.Errorf("a graph inside the product bound took %v", el)
 	}
 }
+
+// TestLargeDiameterGraphsStayBounded is the regression guard for two quadratic
+// paths that the input caps did not model, both selected by graph DIAMETER
+// rather than by size. A long chain is only ~380 KB of input yet made Distances
+// materialise a path per vertex (O(V*diameter)), and a "broom" — a chain with a
+// back-edge from every vertex — made DetectCycle's witness search reconstruct a
+// path per in-neighbour, churning gigabytes to emit a three-element cycle.
+func TestLargeDiameterGraphsStayBounded(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	const n = 20000
+
+	chain := &gen.Graph{Directed: true}
+	for i := 0; i < n; i++ {
+		chain.Nodes = append(chain.Nodes, &gen.GraphNode{Id: "n" + itoa(i)})
+	}
+	for i := 0; i+1 < n; i++ {
+		chain.Edges = append(chain.Edges, &gen.GraphEdge{From: "n" + itoa(i), To: "n" + itoa(i+1)})
+	}
+
+	start := time.Now()
+	d, err := nodes.Distances(ctx, ax, &gen.DistancesRequest{Graph: chain, From: "n0"})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if d.Error != "" {
+		t.Fatalf("unexpected node error: %s", d.Error)
+	}
+	if len(d.Distances) != n {
+		t.Errorf("got %d distances, want %d", len(d.Distances), n)
+	}
+	// The far end of the chain is n-1 hops away — a real correctness check that
+	// the hop counts survived the change.
+	last := d.Distances[len(d.Distances)-1]
+	for _, e := range d.Distances {
+		if e.Node == "n"+itoa(n-1) {
+			last = e
+		}
+	}
+	if last.HopCount != int32(n-1) {
+		t.Errorf("hop_count to the chain end = %d, want %d", last.HopCount, n-1)
+	}
+	// Was ~2.4s (quadratic) before hop-count memoisation with farthest-first
+	// resolution; ~70ms after. A generous threshold that still catches a
+	// regression to the quadratic behaviour, even under the race detector.
+	if elapsed > 10*time.Second {
+		t.Errorf("Distances on a %d-vertex chain took %v — the O(V*diameter) path reconstruction is back", n, elapsed)
+	}
+	t.Logf("Distances on a %d-vertex chain: %v", n, elapsed.Round(time.Millisecond))
+
+	// Broom: a chain plus a back-edge from every vertex to the head, so the
+	// head has in-degree ~n inside one huge SCC.
+	broom := &gen.Graph{Directed: true}
+	for i := 0; i < n; i++ {
+		broom.Nodes = append(broom.Nodes, &gen.GraphNode{Id: "n" + itoa(i)})
+	}
+	for i := 0; i+1 < n; i++ {
+		broom.Edges = append(broom.Edges, &gen.GraphEdge{From: "n" + itoa(i), To: "n" + itoa(i+1)})
+	}
+	for i := 1; i < n; i++ {
+		broom.Edges = append(broom.Edges, &gen.GraphEdge{From: "n" + itoa(i), To: "n0"})
+	}
+
+	start = time.Now()
+	c, err := nodes.DetectCycle(ctx, ax, broom)
+	elapsed = time.Since(start)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if c.Error != "" {
+		t.Fatalf("unexpected node error: %s", c.Error)
+	}
+	if !c.HasCycle {
+		t.Errorf("a broom graph contains cycles")
+	}
+	if !isWalk(broom, c.Cycle) {
+		t.Errorf("witness %v is not a walk in the graph", c.Cycle)
+	}
+	if c.Cycle[0] != c.Cycle[len(c.Cycle)-1] {
+		t.Errorf("witness %v is not closed", c.Cycle)
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("DetectCycle on a %d-vertex broom took %v — the per-in-neighbour path reconstruction is back", n, elapsed)
+	}
+	t.Logf("DetectCycle on a %d-vertex broom: %v -> witness %v", n, elapsed.Round(time.Millisecond), c.Cycle)
+}

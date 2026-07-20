@@ -13,7 +13,10 @@ import (
 
 // Orders the vertices of a directed acyclic graph so that every edge points
 // from an earlier vertex to a later one — the standard dependency/build order.
-// Ties are broken by vertex id so the ordering is deterministic. Reports
+// The ordering is a deterministic function of the input: the same graph always
+// yields the same order. It is NOT guaranteed to be the lexicographically
+// smallest valid order — vertex ids seed the traversal, but the result is not a
+// lexicographic Kahn ordering. Reports
 // is_dag=false with an empty order when the graph contains a cycle. Requires a
 // directed graph.
 func TopologicalSort(ctx context.Context, ax axiom.Context, input *gen.Graph) (*gen.TopoSortResult, error) {
@@ -33,8 +36,10 @@ func TopologicalSort(ctx context.Context, ax axiom.Context, input *gen.Graph) (*
 		return &gen.TopoSortResult{IsDag: false}, nil
 	}
 
-	// SortStabilized with a lexical tie-break makes the ordering a pure
-	// function of the input rather than of gonum's internal iteration order.
+	// SortStabilized with a lexical comparator makes the ordering a pure
+	// function of the input rather than of gonum's internal map iteration
+	// order. Note the comparator orders gonum's DFS roots, not Kahn's ready
+	// set, so the result is stable but not lexicographically minimal.
 	sorted, err := topo.SortStabilized(b.directedView(), func(nodes []graph.Node) {
 		sort.Slice(nodes, func(i, j int) bool {
 			return b.nameOf[nodes[i].ID()] < b.nameOf[nodes[j].ID()]

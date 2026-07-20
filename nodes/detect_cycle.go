@@ -4,7 +4,6 @@ import (
 	"context"
 	"math"
 
-	"gonum.org/v1/gonum/graph"
 	"gonum.org/v1/gonum/graph/path"
 	"gonum.org/v1/gonum/graph/simple"
 	"gonum.org/v1/gonum/graph/topo"
@@ -110,23 +109,35 @@ func (b *built) directedCycleWitness(comp []string) []string {
 	u := b.idOf[comp[0]]
 	sp := path.DijkstraFrom(simple.Node(u), orderedD{sub})
 
-	var best []graph.Node
+	// Choose the closing in-neighbour by WEIGHT first, then materialise exactly
+	// ONE path. Calling sp.To() for every in-neighbour would allocate a full
+	// path per candidate, making the witness search O(indegree * diameter): a
+	// 20000-vertex "broom" (a long chain with a back-edge from every vertex)
+	// churned 13 GB of allocation to emit a three-element cycle. WeightTo is
+	// O(1) and needs no allocation.
+	var bestY int64
 	bestW := math.Inf(1)
+	found := false
 	it := orderedD{sub}.To(u)
 	for it.Next() {
 		y := it.Node().ID()
-		p, w := sp.To(y)
-		if len(p) == 0 {
+		w := sp.WeightTo(y)
+		if math.IsInf(w, 1) {
 			continue
 		}
-		if w < bestW || (w == bestW && best != nil && b.nameOf[y] < b.nameOf[best[len(best)-1].ID()]) {
-			best, bestW = p, w
+		// Ties break on the caller's id so the witness stays deterministic.
+		if !found || w < bestW || (w == bestW && b.nameOf[y] < b.nameOf[bestY]) {
+			bestY, bestW, found = y, w, true
 		}
 	}
-	if best == nil {
+	if !found {
 		return nil
 	}
-	cycle := b.names(best)
+	p, _ := sp.To(bestY)
+	if len(p) == 0 {
+		return nil
+	}
+	cycle := b.names(p)
 	return append(cycle, comp[0])
 }
 

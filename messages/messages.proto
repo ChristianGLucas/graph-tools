@@ -226,7 +226,9 @@ message PageRankScore {
 // The power iteration runs from a FIXED uniform start vector, accumulating in a
 // fixed order, so the raw scores are bit-for-bit reproducible for a given input
 // — not merely reproducible after rounding. Scores are then rounded to 6
-// decimal places, which is why they sum to 1 only up to about 1e-6.
+// decimal places, so they sum to 1 only up to that rounding: the drift is at
+// most 5e-7 per vertex, so about 1e-6 on a small graph and up to ~0.01 on a
+// 20000-vertex one. Compare ratios rather than relying on the sum.
 message PageRankResult {
   // One entry per vertex, sorted by vertex id.
   repeated PageRankScore scores = 1;
@@ -252,10 +254,11 @@ message CycleResult {
   //   directed   — the number of strongly connected components that contain a
   //                cycle, plus the number of self-loops. A single component
   //                holding many cycles counts once.
-  //   undirected — the circuit rank |E| - |V| + (number of components), plus
-  //                the number of self-loops. This is the size of the cycle
-  //                basis; a graph with 3 independent cycles has 7 distinct
-  //                cycles, and this field reports 3.
+  //   undirected — the circuit rank |E| - |V| + (number of components), where
+  //                |E| counts only NON-self-loop edges, plus the number of
+  //                self-loops. This is the size of the cycle basis; a graph
+  //                with 3 independent cycles has 7 distinct cycles, and this
+  //                field reports 3.
   int32 cycle_count = 3;
   // Structured error message. Empty on success.
   string error = 4;
@@ -280,8 +283,11 @@ message GraphStats {
   bool is_connected = 6;
   // The number of connected components, ignoring edge direction.
   int32 component_count = 7;
-  // The mean vertex degree: 2*|E|/|V| undirected, |E|/|V| directed, counting a
-  // self-loop as 2 undirected or 1 directed. Zero when there are no vertices.
+  // The mean vertex degree, 2*|E|/|V| for BOTH directed and undirected graphs.
+  // For a directed graph this is the mean TOTAL degree (in plus out), since
+  // summing every vertex's in- and out-degree gives 2*|E| either way — so this
+  // is exactly the mean of Centrality's per-vertex "degree" scores. A self-loop
+  // counts 2. Zero when there are no vertices.
   double average_degree = 8;
   // The number of edges whose two endpoints are the same vertex.
   int32 self_loop_count = 9;
