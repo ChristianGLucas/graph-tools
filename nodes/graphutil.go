@@ -106,10 +106,10 @@ type built struct {
 	// confidently wrong FINITE answer. Sorted ascending for determinism.
 	negSelfLoops []int64
 	totalWeight  float64 // sum of every resolved edge weight
-	edgeCount   int     // total edges in the input, including self-loops
-	hasNeg      bool    // true when any resolved edge weight is negative
-	weighted    bool    // true when any resolved edge weight differs from 1
-	hasZero     bool    // true when any resolved edge weight is exactly 0
+	edgeCount    int     // total edges in the input, including self-loops
+	hasNeg       bool    // true when any resolved edge weight is negative
+	weighted     bool    // true when any resolved edge weight differs from 1
+	hasZero      bool    // true when any resolved edge weight is exactly 0
 
 	// wdg/wug hold the non-self-loop edges with their weights. Exactly one is
 	// non-nil, matching `directed`.
