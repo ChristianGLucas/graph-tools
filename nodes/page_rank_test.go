@@ -258,3 +258,61 @@ func TestPageRankUndirectedIsBidirectional(t *testing.T) {
 		t.Errorf("an undirected edge must be symmetric, got %v", got.Scores)
 	}
 }
+
+// TestPageRankRejectsSlowConvergingDamping is the regression guard for an
+// unbounded CPU burn. The iteration count is roughly log(tolerance)/log(damping),
+// which diverges as damping approaches 1: at 0.99 a full-size graph converges in
+// ~0.3s, but at 0.9999999999 a TEN-vertex ring does not return at all. A range
+// check of (0,1) is therefore not a cost bound.
+func TestPageRankRejectsSlowConvergingDamping(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	g := mkGraph(true, []string{"a", "b", "c"}, [][3]any{
+		{"a", "b", 1}, {"b", "c", 1}, {"c", "a", 1},
+	})
+	for _, bad := range []float64{0.991, 0.99999, 0.9999999999, 1} {
+		done := make(chan *gen.PageRankResult, 1)
+		go func(d float64) {
+			r, err := nodes.PageRank(ctx, ax, &gen.PageRankRequest{Graph: g, Damping: d})
+			if err != nil {
+				t.Errorf("unexpected Go error: %v", err)
+			}
+			done <- r
+		}(bad)
+		select {
+		case r := <-done:
+			if r.Error == "" {
+				t.Errorf("damping %v must be rejected, got %+v", bad, r)
+			}
+		case <-time.After(15 * time.Second):
+			t.Fatalf("damping %v did not return within 15s — the iteration is unbounded", bad)
+		}
+	}
+}
+
+// The largest ACCEPTED damping must still complete quickly at full scale —
+// otherwise the bound does not bound the cost.
+func TestPageRankMaxDampingStaysFast(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	const n = 20000
+	g := &gen.Graph{Directed: true}
+	for i := 0; i < n; i++ {
+		g.Nodes = append(g.Nodes, &gen.GraphNode{Id: "n" + itoa(i)})
+	}
+	for i := 0; i < n; i++ {
+		g.Edges = append(g.Edges, &gen.GraphEdge{From: "n" + itoa(i), To: "n" + itoa((i+1)%n)})
+	}
+	start := time.Now()
+	got, err := nodes.PageRank(ctx, ax, &gen.PageRankRequest{Graph: g, Damping: 0.99})
+	if err != nil || got.Error != "" {
+		t.Fatalf("damping 0.99 at the vertex limit must be accepted: err=%v nodeErr=%s", err, got.Error)
+	}
+	if elapsed := time.Since(start); elapsed > 30*time.Second {
+		t.Errorf("PageRank at max damping and max size took %v — the damping bound does not bound the cost", elapsed)
+	}
+	// A ring is symmetric, so every score must be 1/n.
+	for _, s := range got.Scores {
+		if !nearly(s.Score, 1/float64(n), 1e-5) {
+			t.Fatalf("score(%s) = %v, closed form = %v", s.Node, s.Score, 1/float64(n))
+		}
+	}
+}

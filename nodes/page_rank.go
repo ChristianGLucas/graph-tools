@@ -47,8 +47,15 @@ func PageRank(ctx context.Context, ax axiom.Context, input *gen.PageRankRequest)
 	if damping == 0 {
 		damping = 0.85
 	}
-	if damping <= 0 || damping >= 1 {
-		return &gen.PageRankResult{Error: "damping must be strictly between 0 and 1"}, nil
+	// The upper bound is 0.99, not 1. The power iteration needs roughly
+	// log(tolerance)/log(damping) steps, so the cost grows without limit as
+	// damping approaches 1: at 0.99 a full-size graph converges in ~0.3s, but
+	// at 0.9999999999 it does not return at all — an unbounded CPU burn from a
+	// single caller-supplied float.
+	if damping <= 0 || damping > maxPageRankDamping {
+		return &gen.PageRankResult{Error: fmt.Sprintf(
+			"damping must be greater than 0 and at most %g; values nearer 1 make the power iteration converge arbitrarily slowly",
+			maxPageRankDamping)}, nil
 	}
 
 	if err := ctx.Err(); err != nil {

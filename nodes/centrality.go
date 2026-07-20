@@ -16,7 +16,9 @@ import (
 //
 //	"degree"       — the number of incident edges (in plus out for a directed
 //	                 graph); a self-loop counts 2, per the usual convention.
-//	"betweenness"  — how many shortest paths run through the vertex.
+//	"betweenness"  — how many shortest paths run through the vertex, counted
+//	                 over unordered pairs. Computed on the UNWEIGHTED topology
+//	                 (hop counts); edge weights are ignored for this measure.
 //	"closeness"    — the reciprocal of the summed distance FROM every vertex
 //	                 that can reach it (the standard incoming convention).
 //	"eccentricity" — the distance to the farthest vertex this vertex can REACH
@@ -79,13 +81,25 @@ func Centrality(ctx context.Context, ax axiom.Context, input *gen.CentralityRequ
 
 		switch measure {
 		case "betweenness":
-			// Only the weighted form needs the all-pairs result. Computing it
-			// for the unweighted form and then discarding it doubles the cost
-			// of the most expensive measure in the package.
-			if b.weighted {
-				scores = network.BetweennessWeighted(b.weightedLister(), path.DijkstraAllPaths(g))
-			} else {
-				scores = network.Betweenness(g)
+			// Always the unweighted Brandes algorithm, never the weighted form.
+			// gonum's BetweennessWeighted enumerates EVERY shortest path via
+			// AllShortest, which is exponential when shortest paths tie — a
+			// 600-vertex graph with uniform weights does not finish in 45s and
+			// allocates gigabytes, and no size cap can bound that safely.
+			// Brandes is O(V*E) with no path enumeration: the same graph takes
+			// 351ms. The cost is that betweenness reflects hop-count topology
+			// rather than edge weights, which the docs state explicitly.
+			raw := network.Betweenness(g)
+			scores = make(map[int64]float64, len(raw))
+			for k, v := range raw {
+				// gonum accumulates over ORDERED pairs, so an undirected graph
+				// comes out at twice the conventional (Brandes / networkx /
+				// textbook) unnormalised value. Halve it so a caller
+				// cross-checking against a standard tool gets the same number.
+				if !b.directed {
+					v /= 2
+				}
+				scores[k] = v
 			}
 		case "closeness":
 			scores = network.Closeness(g, path.DijkstraAllPaths(g))

@@ -176,3 +176,77 @@ func TestDetectCycleNilGraph(t *testing.T) {
 		t.Errorf("expected a structured error for a nil graph")
 	}
 }
+
+// TestDetectCycleNegativeWeightsUndirected is the regression guard for a crash
+// on VALID input. The undirected cycle witness walked the spanning forest with
+// Dijkstra, which PANICS on a negative edge weight ("dijkstra: negative edge
+// weight") — killing the node process and returning an opaque 502. Negative
+// weights are a supported input class (ShortestPath switches to Bellman-Ford
+// for them), so this had to be a structured result, not a crash.
+func TestDetectCycleNegativeWeightsUndirected(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	cases := map[string]*gen.Graph{
+		"negative edge ON the cycle": mkGraph(false, []string{"a", "b", "c"}, [][3]any{
+			{"a", "b", -1}, {"b", "c", 1}, {"c", "a", 1},
+		}),
+		"negative edge OFF the cycle": mkGraph(false, []string{"a", "b", "c", "d"}, [][3]any{
+			{"a", "b", 1}, {"b", "c", 1}, {"c", "a", 1}, {"c", "d", -5},
+		}),
+		"all negative": mkGraph(false, []string{"a", "b", "c"}, [][3]any{
+			{"a", "b", -1}, {"b", "c", -2}, {"c", "a", -3},
+		}),
+		"negative with a self-loop": mkGraph(false, []string{"a", "b", "c"}, [][3]any{
+			{"a", "a", -1}, {"a", "b", -1}, {"b", "c", 1}, {"c", "a", 1},
+		}),
+	}
+	for name, g := range cases {
+		t.Run(name, func(t *testing.T) {
+			got, err := nodes.DetectCycle(ctx, ax, g)
+			if err != nil {
+				t.Fatalf("unexpected Go error: %v", err)
+			}
+			if got.Error != "" {
+				t.Fatalf("unexpected node error: %s", got.Error)
+			}
+			if !got.HasCycle {
+				t.Errorf("expected a cycle, got %+v", got)
+			}
+			// The witness must still be a genuine closed walk.
+			if !isWalk(g, got.Cycle) {
+				t.Errorf("cycle %v is not a walk in the graph", got.Cycle)
+			}
+			if got.Cycle[0] != got.Cycle[len(got.Cycle)-1] {
+				t.Errorf("cycle %v is not closed", got.Cycle)
+			}
+			// And the count must still match the independent Euler oracle.
+			if want := circuitRank(g); int(got.CycleCount) != want+selfLoopsOf(g) {
+				t.Errorf("cycle_count = %d, Euler oracle + self-loops = %d", got.CycleCount, want+selfLoopsOf(g))
+			}
+		})
+	}
+}
+
+func selfLoopsOf(g *gen.Graph) int {
+	n := 0
+	for _, e := range g.Edges {
+		if e.From == e.To {
+			n++
+		}
+	}
+	return n
+}
+
+// The directed branch must survive negative weights too.
+func TestDetectCycleNegativeWeightsDirected(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	g := mkGraph(true, []string{"a", "b", "c"}, [][3]any{
+		{"a", "b", -1}, {"b", "c", -1}, {"c", "a", -1},
+	})
+	got, err := nodes.DetectCycle(ctx, ax, g)
+	if err != nil || got.Error != "" {
+		t.Fatalf("err=%v nodeErr=%s", err, got.Error)
+	}
+	if !got.HasCycle || !isWalk(g, got.Cycle) {
+		t.Errorf("expected a valid cycle witness, got %+v", got)
+	}
+}

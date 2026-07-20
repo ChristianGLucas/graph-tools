@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"testing"
+	"time"
 
 	gen "christiangeorgelucas/graph-tools/gen"
 	"christiangeorgelucas/graph-tools/nodes"
@@ -396,4 +397,93 @@ func TestCentralityQuadraticProductBound(t *testing.T) {
 	if got.Error == "" {
 		t.Errorf("expected the nodes*edges product bound to fire on 600 nodes * %d edges", len(edges))
 	}
+}
+
+// TestCentralityBetweennessMatchesStandardConvention pins the unnormalised
+// Brandes / networkx value. gonum accumulates over ORDERED pairs, so an
+// undirected graph came out at exactly twice the conventional figure; a caller
+// cross-checking against any standard tool would have seen a silent factor of 2.
+func TestCentralityBetweennessMatchesStandardConvention(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	// Path plus chord: a-b, b-c, c-d, d-e, b-d.
+	// networkx betweenness_centrality(normalized=False) = {a:0,b:3,c:0,d:3,e:0}.
+	g := mkGraph(false, []string{"a", "b", "c", "d", "e"}, [][3]any{
+		{"a", "b", 1}, {"b", "c", 1}, {"c", "d", 1}, {"d", "e", 1}, {"b", "d", 1},
+	})
+	got, err := nodes.Centrality(ctx, ax, &gen.CentralityRequest{Graph: g, Measure: "betweenness"})
+	if err != nil || got.Error != "" {
+		t.Fatalf("err=%v nodeErr=%s", err, got.Error)
+	}
+	m := scoreMap(got)
+	for k, w := range map[string]float64{"a": 0, "b": 3, "c": 0, "d": 3, "e": 0} {
+		if !nearly(m[k], w, 1e-9) {
+			t.Errorf("betweenness(%s) = %v, networkx unnormalised = %v", k, m[k], w)
+		}
+	}
+
+	// A star's centre lies on all 3 unordered leaf pairs.
+	star := mkGraph(false, []string{"c", "l1", "l2", "l3"}, [][3]any{
+		{"c", "l1", 1}, {"c", "l2", 1}, {"c", "l3", 1},
+	})
+	got2, err := nodes.Centrality(ctx, ax, &gen.CentralityRequest{Graph: star, Measure: "betweenness"})
+	if err != nil || got2.Error != "" {
+		t.Fatalf("err=%v nodeErr=%s", err, got2.Error)
+	}
+	if m2 := scoreMap(got2); !nearly(m2["c"], 3, 1e-9) {
+		t.Errorf("betweenness(star centre) = %v, want 3", m2["c"])
+	}
+
+	// Directed already matches networkx and must NOT be halved: on a->b->c,
+	// b lies on the single ordered pair (a,c).
+	dg := mkGraph(true, []string{"a", "b", "c"}, [][3]any{{"a", "b", 1}, {"b", "c", 1}})
+	got3, err := nodes.Centrality(ctx, ax, &gen.CentralityRequest{Graph: dg, Measure: "betweenness"})
+	if err != nil || got3.Error != "" {
+		t.Fatalf("err=%v nodeErr=%s", err, got3.Error)
+	}
+	if m3 := scoreMap(got3); !nearly(m3["b"], 1, 1e-9) {
+		t.Errorf("directed betweenness(b) = %v, want 1", m3["b"])
+	}
+}
+
+// TestCentralityBetweennessStaysFastOnTiedWeights is the regression guard for
+// an exponential blow-up: the WEIGHTED betweenness path enumerated every
+// shortest path, so a graph with many tied shortest paths did not finish in 45s
+// and allocated gigabytes. Brandes on the unweighted topology has no such term.
+func TestCentralityBetweennessStaysFastOnTiedWeights(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	// 400 vertices, ~1600 uniform-weight edges: maximally tied shortest paths.
+	var ids []string
+	for i := 0; i < 400; i++ {
+		ids = append(ids, "n"+itoa(i))
+	}
+	var edges [][3]any
+	seen := map[[2]int]bool{}
+	for s := 1; len(edges) < 1600 && s < 400; s++ {
+		for i := 0; i < 400 && len(edges) < 1600; i++ {
+			j := (i + s) % 400
+			if i >= j || seen[[2]int{i, j}] {
+				continue
+			}
+			seen[[2]int{i, j}] = true
+			edges = append(edges, [3]any{ids[i], ids[j], 2.0})
+		}
+	}
+	g := mkGraph(false, ids, edges)
+
+	start := time.Now()
+	got, err := nodes.Centrality(ctx, ax, &gen.CentralityRequest{Graph: g, Measure: "betweenness"})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if got.Error != "" {
+		t.Fatalf("unexpected node error: %s", got.Error)
+	}
+	if elapsed > 30*time.Second {
+		t.Errorf("betweenness on %d tied-weight edges took %v — the path-enumeration blow-up is back", len(edges), elapsed)
+	}
+	if len(got.Scores) != 400 {
+		t.Errorf("got %d scores, want 400", len(got.Scores))
+	}
+	t.Logf("betweenness over %d uniform-weight edges: %v", len(edges), elapsed.Round(time.Millisecond))
 }

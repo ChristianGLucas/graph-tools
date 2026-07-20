@@ -34,6 +34,11 @@ const (
 	// the sparse one is used.)
 	maxPageRankNodes = maxNodes
 
+	// maxPageRankDamping bounds the iteration count. PageRank needs about
+	// log(tol)/log(damping) steps, which diverges as damping approaches 1:
+	// 0.99 converges in ~0.3s on a full-size graph, 0.9999999999 never returns.
+	maxPageRankDamping = 0.99
+
 	// maxQuadraticNodes bounds the VERTEX count for the all-pairs measures
 	// (betweenness, closeness, harmonic, eccentricity).
 	maxQuadraticNodes = 600
@@ -53,7 +58,10 @@ const (
 
 	// maxEncodedBytes bounds the whole request, as a backstop for any byte
 	// dimension the per-field caps do not model.
-	maxEncodedBytes = 8 << 20 // 8 MiB
+	// Kept below the transport's own message ceiling (~4 MiB) so that this
+	// node's structured error actually fires, rather than the caller getting an
+	// opaque gateway failure before any node code runs.
+	maxEncodedBytes = 3 << 20 // 3 MiB
 )
 
 // built is the validated, canonical in-memory form of a gen.Graph.
@@ -297,15 +305,6 @@ func sortPairs(s []edgePair) {
 		}
 		return s[i].b < s[j].b
 	})
-}
-
-// weightedLister exposes the graph as gonum's weighted interface, for the
-// weight-aware centrality measures.
-func (b *built) weightedLister() graph.Weighted {
-	if b.directed {
-		return orderedWD{b.wdg}
-	}
-	return orderedWU{b.wug}
 }
 
 // quote renders a caller-supplied id for inclusion in an error message.

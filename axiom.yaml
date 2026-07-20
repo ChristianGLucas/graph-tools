@@ -1,5 +1,5 @@
 name: christiangeorgelucas/graph-tools
-version: 0.2.0
+version: 0.3.0
 language: go
 description: Composable graph-algorithm nodes — shortest path, distances, topological sort, connected components, minimum spanning tree, centrality, PageRank, cycle detection, structural stats and induced subgraphs — over a single canonical Graph envelope, wrapping the BSD-3-Clause gonum/graph library. Every node is stateless, deterministic for a given input, and rejects malformed graphs with a structured error rather than guessing.
 license: MIT
@@ -33,15 +33,15 @@ nodes:
     - name: MinimumSpanningTree
       input: Graph
       output: Graph
-      description: Selects the cheapest set of edges that connects every vertex without forming a cycle, using Kruskal's algorithm. Returns the tree as a plain Graph, so it feeds directly into Describe, DetectCycle, ConnectedComponents or TopologicalSort with no adapter. A disconnected input yields a minimum spanning forest rather than an error. Requires an undirected graph; pipe the result into Describe to recover the tree's total weight.
+      description: Selects the cheapest set of edges that connects every vertex without forming a cycle, using Kruskal's algorithm. Returns the tree as a plain Graph, so it feeds directly into Describe, DetectCycle or ConnectedComponents with no adapter. (Not into TopologicalSort, which requires a directed graph while a spanning tree is always undirected.) A disconnected input yields a minimum spanning forest rather than an error. Requires an undirected graph; pipe the result into Describe to recover the tree's total weight.
     - name: Centrality
       input: CentralityRequest
       output: CentralityResult
-      description: Scores every vertex by structural importance under one of five measures — degree, betweenness, closeness, harmonic or eccentricity — to answer which vertex is the hub, the bottleneck or the outlier. Degree is purely structural and works on any graph; the other four need an all-pairs shortest-path computation and so reject negative weights and graphs above 600 vertices or a 1200000 vertex-edge product. Scores are always finite, with unreachable vertices scoring 0.
+      description: Scores every vertex by structural importance under one of five measures — degree, betweenness, closeness, harmonic or eccentricity — to answer which vertex is the hub, the bottleneck or the outlier. Degree is purely structural and works on any graph; the other four need an all-pairs shortest-path computation and so reject negative weights and graphs above 600 vertices or a 1200000 vertex-edge product. Betweenness is computed on the unweighted hop-count topology and matches the standard unnormalised (Brandes/networkx) convention. Scores are always finite, with unreachable vertices scoring 0.
     - name: PageRank
       input: PageRankRequest
       output: PageRankResult
-      description: Ranks vertices by link importance using the PageRank power iteration — a vertex matters when vertices that matter point at it. Honours self-loops and treats an undirected graph as bidirectional. Scores sum to 1 and are rounded to 6 decimal places so the output is reproducible despite the iteration starting from a random vector. Edge weights are ignored; only the link topology counts.
+      description: Ranks vertices by link importance using the PageRank power iteration — a vertex matters when vertices that matter point at it. Honours self-loops and treats an undirected graph as bidirectional. Scores sum to 1 (up to the rounding) and are rounded to 6 decimal places so the output is reproducible despite the iteration starting from a random vector. Damping defaults to 0.85 and must be at most 0.99, since convergence slows without bound as it approaches 1. Edge weights are ignored; only the link topology counts.
     - name: DetectCycle
       input: Graph
       output: CycleResult
@@ -53,4 +53,4 @@ nodes:
     - name: Subgraph
       input: SubgraphRequest
       output: Graph
-      description: Extracts the subgraph induced by a set of vertices, keeping exactly those vertices and every edge whose endpoints are both kept. Returns a plain Graph, so it chains directly into any graph-consuming node with no adapter — the standard way to narrow a large graph before running an expensive all-pairs measure on it. A requested vertex id that is not in the source graph is rejected rather than silently ignored.
+      description: Extracts the subgraph induced by a set of vertices, keeping exactly those vertices and every edge whose endpoints are both kept. Returns a plain Graph, so in a flow it chains with no adapter into the nodes that take a top-level Graph — Describe, DetectCycle, ConnectedComponents, TopologicalSort and MinimumSpanningTree. Centrality and the other request-wrapper nodes nest their graph inside a request message, which cannot cross a flow edge, so narrowing a graph before an all-pairs measure works when you invoke Centrality directly rather than wiring it downstream. A requested vertex id that is not in the source graph is rejected rather than silently ignored.

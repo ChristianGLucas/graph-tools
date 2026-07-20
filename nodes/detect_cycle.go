@@ -15,8 +15,8 @@ import (
 
 // Reports whether a graph contains a cycle and returns one concrete example.
 // For a directed graph a cycle is a strongly connected component with more than
-// one vertex (or a self-loop), and cycle_count is the number of such
-// components. For an undirected graph cycle_count is the circuit rank
+// one vertex (or a self-loop), and cycle_count is the number of such components
+// PLUS the number of self-loops. For an undirected graph cycle_count is the circuit rank
 // |E| - |V| + (number of components), the number of independent cycles. The
 // returned example cycle repeats its first vertex id at the end to close it.
 func DetectCycle(ctx context.Context, ax axiom.Context, input *gen.Graph) (*gen.CycleResult, error) {
@@ -160,7 +160,22 @@ func (b *built) undirectedCycleWitness() []string {
 	sortPairs(extras)
 	chosen := extras[0]
 
-	sp := path.DijkstraFrom(simple.Node(b.idOf[chosen.a]), orderedWU{forest})
+	// The witness needs only the UNIQUE tree path between the endpoints, so
+	// edge weights are irrelevant — and running Dijkstra over the weighted
+	// forest PANICS ("dijkstra: negative edge weight") whenever the graph has a
+	// negative weight, which is a supported input class. Search an unweighted
+	// copy of the forest instead, where every edge costs 1.
+	plain := simple.NewUndirectedGraph()
+	for _, id := range b.ids {
+		plain.AddNode(simple.Node(b.idOf[id]))
+	}
+	fe := forest.Edges()
+	for fe.Next() {
+		e := fe.Edge()
+		plain.SetEdge(simple.Edge{F: simple.Node(e.From().ID()), T: simple.Node(e.To().ID())})
+	}
+
+	sp := path.DijkstraFrom(simple.Node(b.idOf[chosen.a]), orderedU{plain})
 	p, _ := sp.To(b.idOf[chosen.b])
 	if len(p) == 0 {
 		return nil

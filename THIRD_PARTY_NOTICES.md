@@ -10,6 +10,13 @@ follow.
 There is no copyleft-licensed code (GPL, LGPL, AGPL, MPL, CDDL, EPL, SSPL) in
 this package or anywhere in its dependency tree.
 
+Note on the Go PATENTS grants: `golang.org/x/net`, `golang.org/x/sys`,
+`golang.org/x/text` and `google.golang.org/protobuf` each ship an additional
+patent grant. All four files are byte-identical (md5
+`3a55d95595a6f9e37dee53826b4daff2`), so the text is reproduced twice below
+rather than four times; the reproduced text applies to all four. The grant is an
+additional permission, not a condition of BSD-3-Clause redistribution.
+
 ## Summary
 
 | Component | Version | Licence | Role |

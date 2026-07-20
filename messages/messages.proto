@@ -48,7 +48,7 @@ message GraphEdge {
 // uniquely-identified vertices plus the edges between them.
 //
 // Limits, enforced on the raw input before anything is allocated: at most
-// 20000 vertices, at most 200000 edges, and at most 8 MiB of total encoded
+// 20000 vertices, at most 200000 edges, and at most 3 MiB of total encoded
 // size. Individual all-pairs operations impose tighter limits of their own.
 message Graph {
   // True for a directed graph, false for an undirected graph. Several nodes
@@ -158,7 +158,10 @@ message CentralityRequest {
   Graph graph = 1;
   // Which measure to compute. One of, exactly and in lower case:
   //   "degree"       — number of incident edges (in+out for a directed graph).
-  //   "betweenness"  — how many shortest paths run through the vertex.
+  //   "betweenness"  — how many shortest paths run through the vertex, counted
+  //                    over unordered pairs, matching the standard unnormalised
+  //                    (Brandes/networkx) convention. Computed on the UNWEIGHTED
+  //                    hop-count topology; edge weights are ignored here.
   //   "closeness"    — reciprocal of the summed distance FROM every vertex
   //                    that can reach it (the standard incoming convention).
   //   "eccentricity" — distance to the farthest vertex the vertex can REACH
@@ -198,8 +201,11 @@ message CentralityResult {
 message PageRankRequest {
   // The graph to rank.
   Graph graph = 1;
-  // Damping factor, strictly between 0 and 1. Defaults to 0.85 when omitted
-  // or zero. Must be finite; NaN and infinity are rejected.
+  // Damping factor. Must be greater than 0 and AT MOST 0.99, and must be
+  // finite — NaN and infinity are rejected. Defaults to 0.85 when omitted or
+  // zero. The upper bound is 0.99 rather than 1 because the power iteration
+  // needs about log(tolerance)/log(damping) steps, so the cost grows without
+  // limit as damping approaches 1.
   double damping = 2;
   // Field 3 was `tolerance`. It was removed before publication: the underlying
   // power iteration starts from a random vector, so a caller-tunable tolerance
