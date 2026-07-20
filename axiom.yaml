@@ -58,6 +58,3 @@ nodes:
       description: Extracts the subgraph induced by a set of vertices, keeping exactly those vertices and every edge whose endpoints are both kept. Returns a plain Graph, so in a flow it chains with no adapter into the nodes that take a top-level Graph — Describe, DetectCycle, ConnectedComponents, TopologicalSort and MinimumSpanningTree. Centrality and the other request-wrapper nodes nest their graph inside a request message, which cannot cross a flow edge, so narrowing a graph before an all-pairs measure works when you invoke Centrality directly rather than wiring it downstream. A requested vertex id that is not in the source graph is rejected rather than silently ignored.
       input: SubgraphRequest
       output: Graph
-    - name: Orient
-      input: OrientRequest
-      output: Graph
