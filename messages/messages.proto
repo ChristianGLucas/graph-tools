@@ -207,9 +207,9 @@ message PageRankRequest {
   // needs about log(tolerance)/log(damping) steps, so the cost grows without
   // limit as damping approaches 1.
   double damping = 2;
-  // Field 3 was `tolerance`. It was removed before publication: the underlying
-  // power iteration starts from a random vector, so a caller-tunable tolerance
-  // made results irreproducible. The tolerance is now pinned internally.
+  // Field 3 was `tolerance`. It was removed before publication: a
+  // caller-tunable convergence tolerance made results irreproducible and let a
+  // caller drive the iteration count. The tolerance is pinned internally.
   reserved 3;
 }
 
@@ -217,19 +217,16 @@ message PageRankRequest {
 message PageRankScore {
   // The vertex id.
   string node = 1;
-  // The PageRank value, rounded to 6 decimal places. See PageRankResult for
-  // why the rounding exists.
+  // The PageRank value, rounded to 6 decimal places.
   double score = 2;
 }
 
 // PageRank scores for every vertex.
 //
-// The underlying power iteration starts from a randomly seeded vector, so raw
-// scores wobble in their last digits between runs. Scores are therefore
-// computed to a pinned tolerance of 1e-14 and then rounded to 6 decimal
-// places, which is far coarser than the residual error and makes this node's
-// output reproducible for a given input. Because of that rounding the scores
-// sum to 1 only up to about 1e-6.
+// The power iteration runs from a FIXED uniform start vector, accumulating in a
+// fixed order, so the raw scores are bit-for-bit reproducible for a given input
+// — not merely reproducible after rounding. Scores are then rounded to 6
+// decimal places, which is why they sum to 1 only up to about 1e-6.
 message PageRankResult {
   // One entry per vertex, sorted by vertex id.
   repeated PageRankScore scores = 1;

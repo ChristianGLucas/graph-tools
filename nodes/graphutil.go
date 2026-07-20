@@ -1,6 +1,7 @@
 package nodes
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sort"
@@ -39,13 +40,21 @@ const (
 	// 0.99 converges in ~0.3s on a full-size graph, 0.9999999999 never returns.
 	maxPageRankDamping = 0.99
 
-	// maxNegativeWeightNodes bounds the Bellman-Ford path. A single negative
-	// edge weight switches the algorithm from Dijkstra to Bellman-Ford, whose
-	// negative-cycle detection is O(V^2) and INDEPENDENT of the edge count — so
-	// the 20000-vertex cap sized for Dijkstra does not bound it at all: 20000
-	// vertices and three edges forming a negative cycle costs ~106s from a
-	// 200KB payload. At 2000 vertices the same shape costs under a second.
+	// maxNegativeWeightNodes bounds the VERTEX count on the Bellman-Ford path. A
+	// single negative edge weight switches the algorithm from Dijkstra to
+	// Bellman-Ford, which the 20000-vertex cap sized for Dijkstra does not bound
+	// at all: 20000 vertices and three edges forming a negative cycle cost ~106s
+	// from a 200KB payload. Both this and the product cap below are needed —
+	// neither dimension bounds the cost alone.
 	maxNegativeWeightNodes = 2000
+
+	// maxNegativeWeightProduct bounds the ACTUAL cost of the Bellman-Ford path.
+	// gonum uses Bellman-Ford-Moore (SPFA): its `loops > V*(V-1)` guard caps
+	// DEQUEUES, and each dequeue scans that vertex's out-edges — so the real
+	// cost is O(V*E), and the edge count the vertex cap ignores is the dominant
+	// term. 2000 vertices with 200000 edges measured over a minute; bounding
+	// the product instead keeps the worst case near 0.2s.
+	maxNegativeWeightProduct = 1200000
 
 	// maxQuadraticNodes bounds the VERTEX count for the all-pairs measures
 	// (betweenness, closeness, harmonic, eccentricity).
@@ -160,11 +169,11 @@ func buildGraph(g *graphInput) (*built, error) {
 			return nil, fmt.Errorf("node id %s contains a control character at byte %d", quote(n.Id), i)
 		}
 		if len(n.Label) > maxLabelBytes {
-			return nil, fmt.Errorf("label on node %q is %d bytes, exceeding the limit of %d",
-				n.Id, len(n.Label), maxLabelBytes)
+			return nil, fmt.Errorf("label on node %s is %d bytes, exceeding the limit of %d",
+				quote(n.Id), len(n.Label), maxLabelBytes)
 		}
 		if seen[n.Id] {
-			return nil, fmt.Errorf("duplicate node id %q", n.Id)
+			return nil, fmt.Errorf("duplicate node id %s", quote(n.Id))
 		}
 		seen[n.Id] = true
 		b.ids = append(b.ids, n.Id)
@@ -228,7 +237,7 @@ func buildGraph(g *graphInput) (*built, error) {
 		}
 		w := resolveWeight(e.Weight, e.ExplicitZeroWeight)
 		if math.IsNaN(w) || math.IsInf(w, 0) {
-			return nil, fmt.Errorf("edge %q -> %q has a non-finite weight", e.From, e.To)
+			return nil, fmt.Errorf("edge %s -> %s has a non-finite weight", quote(e.From), quote(e.To))
 		}
 		if w < 0 {
 			b.hasNeg = true
@@ -249,7 +258,7 @@ func buildGraph(g *graphInput) (*built, error) {
 			key = pair{toID, fromID}
 		}
 		if edgeSeen[key] {
-			return nil, fmt.Errorf("duplicate edge %q -> %q", e.From, e.To)
+			return nil, fmt.Errorf("duplicate edge %s -> %s", quote(e.From), quote(e.To))
 		}
 		edgeSeen[key] = true
 
@@ -355,26 +364,47 @@ func indexControlChar(s string) int {
 // the graph's weights: Dijkstra when every weight is non-negative, Bellman-Ford
 // otherwise. The second return value is a non-empty error message when the
 // result is undefined (a reachable negative-weight cycle).
-func (b *built) shortestFrom(from int64) (path.Shortest, string) {
+func (b *built) shortestFrom(ctx context.Context, from int64) (path.Shortest, string) {
 	g := b.weightedGraph()
 	src := simple.Node(from)
 	if !b.hasNeg {
+		// Dijkstra is O(E log V) and fully bounded by the global input caps —
+		// under half a second at the largest admissible payload.
 		return path.DijkstraFrom(src, g), ""
 	}
-	// Bellman-Ford's negative-cycle detection loops until it exceeds
-	// V*(V-1) relaxations, so its cost is quadratic in the VERTEX count and
-	// independent of the edge count. The global 20000-vertex cap is sized for
-	// Dijkstra and does not bound it, so the negative-weight path needs its own.
+
+	// A single negative weight switches to Bellman-Ford, which is the one path
+	// in this package whose cost is NOT bounded by the global caps. gonum uses
+	// Bellman-Ford-Moore (SPFA): its `loops > V*(V-1)` guard caps DEQUEUES, and
+	// each dequeue scans that vertex's out-edges, so the real cost is O(V*E) —
+	// the edge count is the dominant term, not an irrelevant one. Hence both a
+	// vertex cap and a product cap, and the wall-clock budget below.
 	if len(b.ids) > maxNegativeWeightNodes {
 		return path.Shortest{}, fmt.Sprintf(
 			"graphs with negative edge weights use Bellman-Ford, which is limited to %d nodes; graph has %d",
 			maxNegativeWeightNodes, len(b.ids))
 	}
-	sp, ok := path.BellmanFordFrom(src, g)
-	if !ok {
-		return sp, "graph contains a negative-weight cycle reachable from the source; shortest paths are undefined"
+	if product := len(b.ids) * b.edgeCount; product > maxNegativeWeightProduct {
+		return path.Shortest{}, fmt.Sprintf(
+			"graphs with negative edge weights use Bellman-Ford, which costs O(nodes*edges) and is limited to a product of %d; graph has %d nodes * %d edges = %d",
+			maxNegativeWeightProduct, len(b.ids), b.edgeCount, product)
 	}
-	return sp, ""
+
+	type bfResult struct {
+		sp path.Shortest
+		ok bool
+	}
+	res, budgetErr := runBounded(ctx, "negative-weight shortest-path search", func() bfResult {
+		sp, ok := path.BellmanFordFrom(src, g)
+		return bfResult{sp, ok}
+	})
+	if budgetErr != nil {
+		return path.Shortest{}, budgetErr.Error()
+	}
+	if !res.ok {
+		return res.sp, "graph contains a negative-weight cycle reachable from the source; shortest paths are undefined"
+	}
+	return res.sp, ""
 }
 
 // requireQuadraticBudget guards the all-pairs measures on BOTH dimensions that

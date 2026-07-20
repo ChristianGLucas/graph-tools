@@ -22,7 +22,7 @@ additional permission, not a condition of BSD-3-Clause redistribution.
 | Component | Version | Licence | Role |
 |---|---|---|---|
 | gonum.org/v1/gonum | v0.17.0 | BSD-3-Clause | graph algorithms (direct dependency) |
-| ├─ Cephes (Stephen L. Moshier) | vendored in gonum | BSD-3-Clause | complex-math routines reachable from gonum |
+| ├─ Cephes (Stephen L. Moshier) | vendored in gonum | BSD-3-Clause | reproduced for completeness of gonum's own third-party notices; not itself in this build closure |
 | ├─ The Go Authors | vendored in gonum | BSD-3-Clause | internal float32/complex64 helpers |
 | google.golang.org/protobuf | v1.36.11 | BSD-3-Clause (+ PATENTS) | message encoding (direct dependency) |
 | google.golang.org/grpc | v1.78.0 | Apache-2.0 (+ NOTICE) | Axiom sidecar transport (indirect) |
@@ -60,7 +60,8 @@ DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
 SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.```
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
 
 ---
 

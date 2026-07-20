@@ -4,6 +4,9 @@ import (
 	"math"
 	"sort"
 
+	"gonum.org/v1/gonum/graph/network"
+	"gonum.org/v1/gonum/graph/simple"
+
 	gen "christiangeorgelucas/graph-tools/gen"
 )
 
@@ -190,4 +193,57 @@ func circuitRank(g *gen.Graph) int {
 		roots[find(n.Id)] = true
 	}
 	return (len(g.Edges) - loops) - len(g.Nodes) + len(roots)
+}
+
+// gonumPageRankReference computes PageRank with gonum's OWN implementation, as
+// an independent reference for the recurrence. It is deliberately not the code
+// under test: this package runs its own power iteration so that the start
+// vector is fixed, and this oracle confirms that choice did not change the
+// answer, only its reproducibility.
+func gonumPageRankReference(g *gen.Graph, damping float64) map[string]float64 {
+	idOf := map[string]int64{}
+	nameOf := map[int64]string{}
+	ids := make([]string, 0, len(g.Nodes))
+	for _, n := range g.Nodes {
+		ids = append(ids, n.Id)
+	}
+	sort.Strings(ids)
+	for i, id := range ids {
+		idOf[id] = int64(i)
+		nameOf[int64(i)] = id
+	}
+
+	dg := simple.NewDirectedGraph()
+	for _, id := range ids {
+		dg.AddNode(simple.Node(idOf[id]))
+	}
+	for _, e := range g.Edges {
+		if e.From == e.To {
+			continue // gonum's simple graphs panic on a self-edge
+		}
+		dg.SetEdge(simple.Edge{F: simple.Node(idOf[e.From]), T: simple.Node(idOf[e.To])})
+		if !g.Directed {
+			dg.SetEdge(simple.Edge{F: simple.Node(idOf[e.To]), T: simple.Node(idOf[e.From])})
+		}
+	}
+
+	raw := network.PageRankSparse(dg, damping, 1e-12)
+	out := map[string]float64{}
+	for k, v := range raw {
+		out[nameOf[k]] = v
+	}
+	return out
+}
+
+// deterministicRand is a tiny reproducible PRNG, so the randomized tests above
+// explore many graph shapes while remaining exactly repeatable.
+type deterministicRand struct{ state uint64 }
+
+func newDeterministicRand(seed uint64) *deterministicRand {
+	return &deterministicRand{state: seed*6364136223846793005 + 1442695040888963407}
+}
+
+func (r *deterministicRand) intn(n int) int {
+	r.state = r.state*6364136223846793005 + 1442695040888963407
+	return int((r.state >> 33) % uint64(n))
 }

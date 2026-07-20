@@ -31,7 +31,7 @@ func ShortestPath(ctx context.Context, ax axiom.Context, input *gen.ShortestPath
 		return &gen.ShortestPathResult{Error: "unknown target node id " + quote(input.To)}, nil
 	}
 
-	sp, errMsg := b.shortestFrom(fromID)
+	sp, errMsg := b.shortestFrom(ctx, fromID)
 	if errMsg != "" {
 		return &gen.ShortestPathResult{Error: errMsg}, nil
 	}

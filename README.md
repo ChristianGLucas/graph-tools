@@ -81,11 +81,21 @@ expect an aborted run from the latter.
 its algorithms are order-sensitive: Dijkstra breaks equal-cost ties by heap
 insertion order, Kruskal sorts edges with a non-stable sort, and PageRank seeds
 its power iteration from a random vector. Every node here drives gonum through
-an ordering wrapper that imposes a total order on each iterator, and PageRank
-additionally converges to a pinned `1e-14` tolerance and rounds to 6 decimal
-places. The same input always produces the same output — asserted by re-invoking
-each node up to 200 times. Because of that rounding, PageRank scores sum to 1
-only up to about `1e-6`.
+an ordering wrapper that imposes a total order on each iterator.
+
+PageRank needed more than that. gonum seeds its power iteration from a *random*
+vector, so raw scores differ in their last digits between runs — and rounding
+the output is not a sufficient fix, because a score whose exact value sits on a
+rounding boundary still flips. (A four-vertex graph scoring exactly `0.0534375`
+returned both `0.053437` and `0.053438`.) This package therefore runs the
+PageRank recurrence itself, from a fixed uniform start vector accumulating in a
+fixed order, so the result is bit-for-bit repeatable before rounding as well as
+after; it is cross-checked against gonum's own implementation in the tests.
+
+The same input always produces the same output — asserted by re-invoking each
+node many times, including across randomly generated graphs and on a known
+rounding-boundary graph. Because scores are rounded to 6 decimals, PageRank
+scores sum to 1 only up to about `1e-6`.
 
 **Malformed input is rejected, never guessed.** Empty, over-long, duplicate or
 control-character-bearing vertex ids; edges pointing at vertices that do not
@@ -98,21 +108,36 @@ amplify the request.
 
 **Bounded work.** Limits are checked against the raw input before anything is
 allocated: 20 000 vertices, 200 000 edges, 3 MiB encoded, 256-byte ids and
-1024-byte labels. The all-pairs centrality measures are additionally capped at
-600 vertices **and** a 1 200 000 vertex×edge product — bounding vertices alone
-is not a cost bound, since a dense 600-vertex graph passes a vertex cap while
-costing over a minute of CPU. PageRank's damping factor is capped at 0.99 for
-the same reason. And a graph carrying any negative weight is capped at 2000
-vertices, because that switches the search to Bellman-Ford, whose
-negative-cycle detection is quadratic in the vertex count and *independent of
-the edge count* — so the 20 000-vertex and 200 000-edge caps did not bound it
-at all.
+1024-byte labels. Two paths get their own tighter bounds, because a caller's
+input silently selects a far more expensive algorithm:
 
-Every node additionally runs its algorithm under a 20-second wall-clock budget
-and returns a structured error if it is exceeded, so a bound that turns out to
-be mis-calibrated for some input shape degrades into an error rather than a
-hang. A cancelled request returns promptly rather than waiting for the
-underlying library call, which takes no context and cannot be interrupted.
+- The all-pairs centrality measures are capped at 600 vertices **and** a
+  1 200 000 vertex×edge product. Bounding vertices alone is not a cost bound: a
+  dense 600-vertex graph passes a vertex cap while costing over a minute.
+- A graph carrying any negative weight switches from Dijkstra to Bellman-Ford
+  and is capped at 2000 vertices **and** the same 1 200 000 product. gonum's
+  Bellman-Ford-Moore costs O(V·E), so the edge count is the dominant term, not
+  an irrelevant one.
+
+PageRank's damping factor is capped at 0.99 for the same family of reason: the
+iteration count grows without limit as damping approaches 1.
+
+The three paths whose cost is not near-linear in the input — PageRank, the
+all-pairs centrality measures, and the negative-weight (Bellman-Ford) shortest
+path search — additionally run under a 20-second wall-clock budget and return a
+structured error if it is exceeded, so a bound that turns out to be
+mis-calibrated for some input shape degrades into an error rather than a hang.
+Those calls also return promptly when the request is cancelled, rather than
+waiting for a library call that takes no context and cannot be interrupted. The
+remaining nodes are near-linear and bounded by the input caps alone — they
+measure under half a second at the largest admissible payload.
+
+**Errors inside a flow.** The eight nodes with a result message report a
+rejected request in band, with an HTTP 200 — so a flow step reports success and
+you must check `error` yourself. The two graph-producing nodes return a bare
+`Graph`, which has no `error` field, so they fail out of band and abort the run;
+the flow reports `graph produced no terminal result` without naming the cause,
+so invoke the node directly to see the real message.
 
 **Centrality conventions.** `eccentricity` is *outgoing* (how far a vertex can
 reach). `closeness` and `harmonic` are *incoming* (summed distance from every

@@ -6,8 +6,6 @@ import (
 	"math"
 	"sort"
 
-	"gonum.org/v1/gonum/graph/network"
-
 	"christiangeorgelucas/graph-tools/axiom"
 	gen "christiangeorgelucas/graph-tools/gen"
 )
@@ -68,11 +66,10 @@ func PageRank(ctx context.Context, ax axiom.Context, input *gen.PageRankRequest)
 	// rounding granularity far above the residual noise, so the emitted scores
 	// are reproducible.
 	//
-	// 1e-12, not 1e-14: gonum's loop has no iteration cap, and on a PERIODIC
-	// graph (a directed ring, say) the residual oscillates and plateaus above
-	// 1e-14, so the loop never exits — a ten-vertex ring at damping 0.999 spins
-	// forever. At 1e-12 the same graph converges in 2ms, and 1e-12 is still six
-	// orders of magnitude finer than the 6-decimal rounding.
+	// 1e-12, not 1e-14: on a PERIODIC graph (a directed ring, say) the residual
+	// oscillates and plateaus near the float64 noise floor, so a 1e-14 target
+	// may never be met. 1e-12 is still six orders of magnitude finer than the
+	// 6-decimal rounding applied below.
 	const pageRankTolerance = 1e-12
 	const pageRankDecimals = 6
 
@@ -80,12 +77,26 @@ func PageRank(ctx context.Context, ax axiom.Context, input *gen.PageRankRequest)
 	// matrix, which at the vertex limit is over 3 GB and OOM-kills the process.
 	// The sparse variant is O(V+E) and returns the same answer.
 	view := b.pageRankView(input.Graph)
-	scores, err := runBounded(ctx, "PageRank", func() map[int64]float64 {
-		return network.PageRankSparse(view, damping, pageRankTolerance)
-	})
-	if err != nil {
-		return &gen.PageRankResult{Error: err.Error()}, nil
+	ids := make([]int64, 0, len(b.ids))
+	for _, id := range b.ids {
+		ids = append(ids, b.idOf[id])
 	}
+
+	type prResult struct {
+		scores map[int64]float64
+		err    error
+	}
+	res, budgetErr := runBounded(ctx, "PageRank", func() prResult {
+		sc, err := deterministicPageRank(view, ids, damping, pageRankTolerance)
+		return prResult{sc, err}
+	})
+	if budgetErr != nil {
+		return &gen.PageRankResult{Error: budgetErr.Error()}, nil
+	}
+	if res.err != nil {
+		return &gen.PageRankResult{Error: res.err.Error()}, nil
+	}
+	scores := res.scores
 
 	out := &gen.PageRankResult{Damping: damping}
 	for _, id := range b.ids {

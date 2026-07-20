@@ -29,7 +29,7 @@ func Distances(ctx context.Context, ax axiom.Context, input *gen.DistancesReques
 		return &gen.DistancesResult{Error: "unknown source node id " + quote(input.From)}, nil
 	}
 
-	sp, errMsg := b.shortestFrom(fromID)
+	sp, errMsg := b.shortestFrom(ctx, fromID)
 	if errMsg != "" {
 		return &gen.DistancesResult{Error: errMsg}, nil
 	}

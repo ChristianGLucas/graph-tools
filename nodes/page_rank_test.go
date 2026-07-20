@@ -365,3 +365,136 @@ func TestPageRankPeriodicGraphConverges(t *testing.T) {
 		}
 	}
 }
+
+// TestPageRankBoundaryGraphIsDeterministic is the regression guard for the
+// defect that rounding could not fix. gonum seeds its power iteration from a
+// RANDOM vector, so raw scores wobble in their last digits; rounding to 6
+// decimals hides that only when the exact value is far from a rounding
+// boundary. This graph's exact score for `b` is 0.0534375 — precisely on the
+// boundary — and it flipped between 0.053437 and 0.053438 across runs of the
+// deployed node. The fix is a fixed uniform start vector, which makes the
+// computation bit-for-bit repeatable so the rounding can no longer flip.
+func TestPageRankBoundaryGraphIsDeterministic(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	g := mkGraph(true, []string{"a", "b", "c", "d"}, [][3]any{
+		{"d", "a", 1}, {"a", "a", 1}, {"c", "b", 1}, {"c", "d", 1}, {"b", "d", 1},
+	})
+	var first []float64
+	for i := 0; i < 300; i++ {
+		got, err := nodes.PageRank(ctx, ax, &gen.PageRankRequest{Graph: g})
+		if err != nil || got.Error != "" {
+			t.Fatalf("err=%v nodeErr=%s", err, got.Error)
+		}
+		cur := make([]float64, len(got.Scores))
+		for j, s := range got.Scores {
+			cur[j] = s.Score
+		}
+		if i == 0 {
+			first = cur
+			continue
+		}
+		for j := range cur {
+			if cur[j] != first[j] {
+				t.Fatalf("run %d differs at %s: %v vs %v (boundary rounding flip)",
+					i, got.Scores[j].Node, cur[j], first[j])
+			}
+		}
+	}
+}
+
+// TestPageRankDeterminismAcrossRandomGraphs replaces a single hard-coded
+// fixture, which could pass against a nondeterministic implementation simply by
+// sitting away from any rounding boundary. This sweeps many shapes, which is
+// how boundary values get hit.
+func TestPageRankDeterminismAcrossRandomGraphs(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	rng := newDeterministicRand(20260720)
+
+	for trial := 0; trial < 120; trial++ {
+		n := 2 + rng.intn(7)
+		ids := make([]string, n)
+		for i := range ids {
+			ids[i] = "n" + itoa(i)
+		}
+		var edges [][3]any
+		seen := map[[2]int]bool{}
+		for e := 0; e < 1+rng.intn(12); e++ {
+			u, v := rng.intn(n), rng.intn(n)
+			if seen[[2]int{u, v}] {
+				continue
+			}
+			seen[[2]int{u, v}] = true
+			edges = append(edges, [3]any{ids[u], ids[v], 1})
+		}
+		g := mkGraph(true, ids, edges)
+
+		var first []float64
+		for rep := 0; rep < 12; rep++ {
+			got, err := nodes.PageRank(ctx, ax, &gen.PageRankRequest{Graph: g})
+			if err != nil || got.Error != "" {
+				t.Fatalf("trial %d: err=%v nodeErr=%s", trial, err, got.Error)
+			}
+			cur := make([]float64, len(got.Scores))
+			sum := 0.0
+			for j, s := range got.Scores {
+				cur[j] = s.Score
+				sum += s.Score
+			}
+			if !nearly(sum, 1, 1e-4) {
+				t.Errorf("trial %d: scores sum to %v, want 1", trial, sum)
+			}
+			if rep == 0 {
+				first = cur
+				continue
+			}
+			for j := range cur {
+				if cur[j] != first[j] {
+					t.Fatalf("trial %d rep %d: nondeterministic score %v vs %v (graph %+v)",
+						trial, rep, cur[j], first[j], edges)
+				}
+			}
+		}
+	}
+}
+
+// TestPageRankMatchesGonum cross-checks the in-package power iteration against
+// gonum's own implementation, which is the independent reference for the
+// recurrence itself (it differs only in its start vector).
+func TestPageRankMatchesGonum(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	rng := newDeterministicRand(99)
+
+	for trial := 0; trial < 60; trial++ {
+		n := 2 + rng.intn(6)
+		ids := make([]string, n)
+		for i := range ids {
+			ids[i] = "n" + itoa(i)
+		}
+		var edges [][3]any
+		seen := map[[2]int]bool{}
+		for e := 0; e < 1+rng.intn(10); e++ {
+			u, v := rng.intn(n), rng.intn(n)
+			if u == v || seen[[2]int{u, v}] {
+				continue
+			}
+			seen[[2]int{u, v}] = true
+			edges = append(edges, [3]any{ids[u], ids[v], 1})
+		}
+		if len(edges) == 0 {
+			continue
+		}
+		g := mkGraph(true, ids, edges)
+
+		got, err := nodes.PageRank(ctx, ax, &gen.PageRankRequest{Graph: g})
+		if err != nil || got.Error != "" {
+			t.Fatalf("trial %d: err=%v nodeErr=%s", trial, err, got.Error)
+		}
+		want := gonumPageRankReference(g, 0.85)
+		for _, s := range got.Scores {
+			if !nearly(s.Score, want[s.Node], 1e-4) {
+				t.Errorf("trial %d: score(%s) = %v, gonum reference = %v (edges %+v)",
+					trial, s.Node, s.Score, want[s.Node], edges)
+			}
+		}
+	}
+}

@@ -621,3 +621,82 @@ func TestComputeBudgetIsHonoured(t *testing.T) {
 		t.Errorf("Centrality must report a cancelled context, got %+v", c)
 	}
 }
+
+// TestNegativeWeightCostIsBoundedByTheProduct is the regression guard for a
+// bound that was calibrated against the wrong cost model. gonum uses
+// Bellman-Ford-Moore (SPFA): the `loops > V*(V-1)` guard caps DEQUEUES, and
+// each dequeue scans that vertex's out-edges — so the real cost is O(V*E), and
+// the edge count is the DOMINANT term, not an irrelevant one. A vertex-only cap
+// was validated on a 3-edge graph; at 2000 vertices and 200000 edges the same
+// shape cost over a minute from a payload that passed every documented bound.
+func TestNegativeWeightCostIsBoundedByTheProduct(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+
+	// 2000 vertices (at the vertex cap) with 5000 edges, one of them negative.
+	// Product = 1e7, well past the 1.2e6 cap, while the payload stays under the
+	// 3 MiB byte cap — so this exercises the PRODUCT bound specifically rather
+	// than tripping an earlier one. In an undirected graph a single negative
+	// edge IS a negative cycle.
+	const n, m = 2000, 5000
+	g := &gen.Graph{Directed: false}
+	for i := 0; i < n; i++ {
+		g.Nodes = append(g.Nodes, &gen.GraphNode{Id: "n" + itoa(i)})
+	}
+	seen := map[[2]int]bool{}
+	for s := 1; len(g.Edges) < m && s < n; s++ {
+		for i := 0; i < n && len(g.Edges) < m; i++ {
+			j := (i + s) % n
+			if i >= j || seen[[2]int{i, j}] {
+				continue
+			}
+			seen[[2]int{i, j}] = true
+			w := 1.0
+			if len(g.Edges) == 0 {
+				w = -1
+			}
+			g.Edges = append(g.Edges, &gen.GraphEdge{From: "n" + itoa(i), To: "n" + itoa(j), Weight: w})
+		}
+	}
+
+	start := time.Now()
+	got, err := nodes.Distances(ctx, ax, &gen.DistancesRequest{Graph: g, From: "n0"})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if got.Error == "" {
+		t.Errorf("expected %d nodes * %d edges to exceed the negative-weight product bound", n, len(g.Edges))
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("refusal took %v — the bound must fire before the work, not after", elapsed)
+	}
+	t.Logf("refused %d*%d in %v: %s", n, len(g.Edges), elapsed.Round(time.Millisecond), got.Error)
+
+	// A graph AT the product bound must still be accepted and answered quickly.
+	small := &gen.Graph{Directed: false}
+	for i := 0; i < 300; i++ {
+		small.Nodes = append(small.Nodes, &gen.GraphNode{Id: "n" + itoa(i)})
+	}
+	for i := 0; i+1 < 300; i++ {
+		w := 1.0
+		if i == 0 {
+			w = -1
+		}
+		small.Edges = append(small.Edges, &gen.GraphEdge{
+			From: "n" + itoa(i), To: "n" + itoa(i+1), Weight: w,
+		})
+	}
+	start = time.Now()
+	ok, err := nodes.Distances(ctx, ax, &gen.DistancesRequest{Graph: small, From: "n0"})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if ok.Error == "" {
+		// An undirected negative edge is a negative cycle, so an error is
+		// expected here — what matters is that it comes back fast.
+		t.Logf("accepted and answered")
+	}
+	if el := time.Since(start); el > 10*time.Second {
+		t.Errorf("a graph inside the product bound took %v", el)
+	}
+}
