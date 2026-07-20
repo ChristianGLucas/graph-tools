@@ -316,3 +316,52 @@ func TestPageRankMaxDampingStaysFast(t *testing.T) {
 		}
 	}
 }
+
+// TestPageRankPeriodicGraphConverges is the regression guard for a hang that
+// the damping cap alone did not cover. gonum's power iteration has NO iteration
+// cap, and on a PERIODIC graph — a directed ring — the residual oscillates and
+// plateaus above a 1e-14 tolerance, so the loop never exits. A ten-vertex ring
+// at damping 0.999 spun forever. The fix is the 1e-12 tolerance; this test
+// pins it by asserting both promptness and the exact closed-form answer.
+func TestPageRankPeriodicGraphConverges(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	for _, n := range []int{2, 3, 10, 50} {
+		ids := make([]string, n)
+		var edges [][3]any
+		for i := 0; i < n; i++ {
+			ids[i] = "n" + itoa(i)
+		}
+		for i := 0; i < n; i++ {
+			edges = append(edges, [3]any{ids[i], ids[(i+1)%n], 1})
+		}
+		g := mkGraph(true, ids, edges)
+
+		// The largest damping the node accepts is the worst case.
+		for _, d := range []float64{0.85, 0.99} {
+			done := make(chan *gen.PageRankResult, 1)
+			go func(damp float64) {
+				r, err := nodes.PageRank(ctx, ax, &gen.PageRankRequest{Graph: g, Damping: damp})
+				if err != nil {
+					t.Errorf("unexpected Go error: %v", err)
+				}
+				done <- r
+			}(d)
+
+			select {
+			case r := <-done:
+				if r.Error != "" {
+					t.Fatalf("ring n=%d damping=%v: %s", n, d, r.Error)
+				}
+				// A ring is vertex-transitive: every score is exactly 1/n.
+				for _, s := range r.Scores {
+					if !nearly(s.Score, 1/float64(n), 1e-5) {
+						t.Errorf("ring n=%d damping=%v: score(%s) = %v, closed form = %v",
+							n, d, s.Node, s.Score, 1/float64(n))
+					}
+				}
+			case <-time.After(20 * time.Second):
+				t.Fatalf("ring n=%d damping=%v did not converge within 20s", n, d)
+			}
+		}
+	}
+}

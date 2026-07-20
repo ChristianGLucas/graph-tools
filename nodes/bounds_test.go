@@ -2,6 +2,7 @@ package nodes_test
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -405,5 +406,218 @@ func TestAllPairsMeasuresStayFastAtTheBound(t *testing.T) {
 			t.Errorf("%s took %v at the documented cost bound — the bound does not bound the cost", measure, elapsed)
 		}
 		t.Logf("%s at the bound: %v", measure, elapsed.Round(time.Millisecond))
+	}
+}
+
+// TestNegativeCycleIsBoundedByVertexCount is the regression guard for a cost
+// amplification the edge and byte caps did not touch. A single negative weight
+// switches Dijkstra -> Bellman-Ford, whose negative-cycle detection loops until
+// it exceeds V*(V-1) relaxations — quadratic in the VERTEX count and
+// independent of the edge count. 20000 vertices plus THREE edges forming a
+// negative cycle is a ~200 KB payload that cost 106 seconds of CPU.
+func TestNegativeCycleIsBoundedByVertexCount(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+
+	mk := func(n int) *gen.Graph {
+		g := &gen.Graph{Directed: true}
+		for i := 0; i < n; i++ {
+			g.Nodes = append(g.Nodes, &gen.GraphNode{Id: "n" + itoa(i)})
+		}
+		for i := 0; i < 3; i++ {
+			g.Edges = append(g.Edges, &gen.GraphEdge{
+				From: "n" + itoa(i), To: "n" + itoa((i+1)%3), Weight: -1,
+			})
+		}
+		return g
+	}
+
+	// Above the Bellman-Ford bound: must be refused, and refused FAST.
+	start := time.Now()
+	got, err := nodes.Distances(ctx, ax, &gen.DistancesRequest{Graph: mk(20000), From: "n0"})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if got.Error == "" {
+		t.Errorf("expected a 20000-vertex negative-weight graph to be refused")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("refusal took %v — the bound must fire before the work, not after", elapsed)
+	}
+
+	// Same for ShortestPath, which shares the code path.
+	sp, err := nodes.ShortestPath(ctx, ax, &gen.ShortestPathRequest{Graph: mk(20000), From: "n0", To: "n1"})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if sp.Error == "" {
+		t.Errorf("ShortestPath must apply the same Bellman-Ford bound")
+	}
+
+	// At the bound the negative cycle must still be correctly REPORTED, quickly.
+	start = time.Now()
+	ok, err := nodes.Distances(ctx, ax, &gen.DistancesRequest{Graph: mk(2000), From: "n0"})
+	elapsed = time.Since(start)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if ok.Error == "" {
+		t.Errorf("a reachable negative cycle must be reported as a structured error")
+	}
+	if elapsed > 20*time.Second {
+		t.Errorf("negative-cycle detection at the bound took %v", elapsed)
+	}
+	t.Logf("negative cycle at the 2000-vertex bound: %v", elapsed.Round(time.Millisecond))
+}
+
+// Negative weights WITHOUT a cycle must still work at the bound.
+func TestNegativeWeightsWithoutCycleStillWork(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	g := mkGraph(true, []string{"a", "b", "c"}, [][3]any{
+		{"a", "b", 5}, {"a", "c", 2}, {"c", "b", -4},
+	})
+	got, err := nodes.ShortestPath(ctx, ax, &gen.ShortestPathRequest{Graph: g, From: "a", To: "b"})
+	if err != nil || got.Error != "" {
+		t.Fatalf("err=%v nodeErr=%s", err, got.Error)
+	}
+	if got.TotalWeight != -2 {
+		t.Errorf("total_weight = %v, want -2", got.TotalWeight)
+	}
+}
+
+// TestErrorMessagesDoNotAmplify: caller strings echoed into an error must be
+// truncated. strconv.Quote expands binary bytes up to fourfold, so echoing an
+// unbounded id back turns a large request into a much larger response.
+func TestErrorMessagesDoNotAmplify(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+
+	huge := make([]byte, 300000)
+	for i := range huge {
+		huge[i] = 0x01
+	}
+
+	// An over-long EDGE ENDPOINT (not a node id) must be rejected without echo.
+	g := &gen.Graph{
+		Nodes: []*gen.GraphNode{{Id: "a"}},
+		Edges: []*gen.GraphEdge{{From: string(huge), To: "a"}},
+	}
+	got, err := nodes.Describe(ctx, ax, g)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if got.Error == "" {
+		t.Fatalf("expected an over-long edge endpoint to be rejected")
+	}
+	if len(got.Error) > 1000 {
+		t.Errorf("error message is %d bytes — caller input is being echoed unbounded", len(got.Error))
+	}
+
+	// An over-long SUBGRAPH SELECTION id, likewise.
+	_, serr := nodes.Subgraph(ctx, ax, &gen.SubgraphRequest{
+		Graph: mkGraph(false, []string{"a"}, nil),
+		Nodes: []string{string(huge)},
+	})
+	if serr == nil {
+		t.Fatalf("expected an over-long selection id to be rejected")
+	}
+	if len(serr.Error()) > 1000 {
+		t.Errorf("Subgraph error is %d bytes — selection input is being echoed unbounded", len(serr.Error()))
+	}
+
+	// An unknown-but-legal-length id IS echoed, but truncated.
+	long := make([]byte, 200)
+	for i := range long {
+		long[i] = 'q'
+	}
+	got2, err := nodes.Describe(ctx, ax, &gen.Graph{
+		Nodes: []*gen.GraphNode{{Id: "a"}},
+		Edges: []*gen.GraphEdge{{From: string(long), To: "a"}},
+	})
+	if err != nil || got2.Error == "" {
+		t.Fatalf("expected an unknown-endpoint error, got err=%v result=%+v", err, got2)
+	}
+	if len(got2.Error) > 300 {
+		t.Errorf("unknown-endpoint error is %d bytes; expected truncation", len(got2.Error))
+	}
+}
+
+// TestControlCharactersInIdsRejected: an id with a NUL or other C0 control
+// character is almost always a caller bug, and would be carried silently into
+// every emitted graph.
+func TestControlCharactersInIdsRejected(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	for _, bad := range []string{"a\x00b", "a\tb", "\x1b[31m", "a\x7f"} {
+		got, err := nodes.Describe(ctx, ax, &gen.Graph{Nodes: []*gen.GraphNode{{Id: bad}}})
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		if got.Error == "" {
+			t.Errorf("id %q contains a control character and must be rejected", bad)
+		}
+	}
+	// Ordinary ids, including non-ASCII, must still be accepted.
+	for _, ok := range []string{"a", "node-1", "café", "日本語", "a b"} {
+		got, err := nodes.Describe(ctx, ax, &gen.Graph{Nodes: []*gen.GraphNode{{Id: ok}}})
+		if err != nil || got.Error != "" {
+			t.Errorf("id %q must be accepted, got err=%v nodeErr=%s", ok, err, got.Error)
+		}
+	}
+}
+
+// TestNegativeZeroWeightRejected: -0.0 compares equal to 0, so it silently took
+// the "omitted weight" branch and became 1.0. Reject rather than guess.
+func TestNegativeZeroWeightRejected(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	negZero := math.Copysign(0, -1)
+
+	g := &gen.Graph{
+		Nodes: []*gen.GraphNode{{Id: "a"}, {Id: "b"}},
+		Edges: []*gen.GraphEdge{{From: "a", To: "b", Weight: negZero}},
+	}
+	got, err := nodes.Describe(ctx, ax, g)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if got.Error == "" {
+		t.Errorf("a negative-zero weight must be rejected, not silently treated as 1.0")
+	}
+
+	// With the explicit flag it is a genuine zero and must be accepted.
+	g2 := &gen.Graph{
+		Nodes: []*gen.GraphNode{{Id: "a"}, {Id: "b"}},
+		Edges: []*gen.GraphEdge{{From: "a", To: "b", Weight: negZero, ExplicitZeroWeight: true}},
+	}
+	got2, err := nodes.Describe(ctx, ax, g2)
+	if err != nil || got2.Error != "" {
+		t.Fatalf("explicit negative zero must be accepted: err=%v nodeErr=%s", err, got2.Error)
+	}
+	if got2.TotalWeight != 0 {
+		t.Errorf("total_weight = %v, want 0", got2.TotalWeight)
+	}
+}
+
+// TestComputeBudgetIsHonoured: a cancelled context must return promptly rather
+// than waiting for an uninterruptible gonum call to finish.
+func TestComputeBudgetIsHonoured(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ax := newTestContext(t)
+	cancel() // already cancelled
+
+	g := mkGraph(true, []string{"a", "b", "c"}, [][3]any{{"a", "b", 1}, {"b", "c", 1}})
+
+	pr, err := nodes.PageRank(ctx, ax, &gen.PageRankRequest{Graph: g})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if pr.Error == "" {
+		t.Errorf("PageRank must report a cancelled context, got %+v", pr)
+	}
+
+	c, err := nodes.Centrality(ctx, ax, &gen.CentralityRequest{Graph: g, Measure: "betweenness"})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if c.Error == "" {
+		t.Errorf("Centrality must report a cancelled context, got %+v", c)
 	}
 }

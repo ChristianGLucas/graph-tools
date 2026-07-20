@@ -39,6 +39,14 @@ const (
 	// 0.99 converges in ~0.3s on a full-size graph, 0.9999999999 never returns.
 	maxPageRankDamping = 0.99
 
+	// maxNegativeWeightNodes bounds the Bellman-Ford path. A single negative
+	// edge weight switches the algorithm from Dijkstra to Bellman-Ford, whose
+	// negative-cycle detection is O(V^2) and INDEPENDENT of the edge count — so
+	// the 20000-vertex cap sized for Dijkstra does not bound it at all: 20000
+	// vertices and three edges forming a negative cycle costs ~106s from a
+	// 200KB payload. At 2000 vertices the same shape costs under a second.
+	maxNegativeWeightNodes = 2000
+
 	// maxQuadraticNodes bounds the VERTEX count for the all-pairs measures
 	// (betweenness, closeness, harmonic, eccentricity).
 	maxQuadraticNodes = 600
@@ -148,6 +156,9 @@ func buildGraph(g *graphInput) (*built, error) {
 		if len(n.Id) > maxIDBytes {
 			return nil, fmt.Errorf("node id is %d bytes, exceeding the limit of %d", len(n.Id), maxIDBytes)
 		}
+		if i := indexControlChar(n.Id); i >= 0 {
+			return nil, fmt.Errorf("node id %s contains a control character at byte %d", quote(n.Id), i)
+		}
 		if len(n.Label) > maxLabelBytes {
 			return nil, fmt.Errorf("label on node %q is %d bytes, exceeding the limit of %d",
 				n.Id, len(n.Label), maxLabelBytes)
@@ -196,15 +207,25 @@ func buildGraph(g *graphInput) (*built, error) {
 		if e == nil {
 			return nil, fmt.Errorf("graph contains a null edge entry")
 		}
+		// Endpoint strings are caller-controlled and are echoed back in the
+		// error below, so they are length-checked here too — the node-id check
+		// above does not cover them.
+		if len(e.From) > maxIDBytes || len(e.To) > maxIDBytes {
+			return nil, fmt.Errorf("edge endpoint id exceeds the limit of %d bytes", maxIDBytes)
+		}
 		fromID, ok := b.idOf[e.From]
 		if !ok {
-			return nil, fmt.Errorf("edge references unknown node id %q in `from`", e.From)
+			return nil, fmt.Errorf("edge references unknown node id %s in `from`", quote(e.From))
 		}
 		toID, ok := b.idOf[e.To]
 		if !ok {
-			return nil, fmt.Errorf("edge references unknown node id %q in `to`", e.To)
+			return nil, fmt.Errorf("edge references unknown node id %s in `to`", quote(e.To))
 		}
 
+		if math.Signbit(e.Weight) && e.Weight == 0 && !e.ExplicitZeroWeight {
+			return nil, fmt.Errorf("edge %s -> %s has a weight of negative zero; set `explicit_zero_weight` to mean a genuine zero cost",
+				quote(e.From), quote(e.To))
+		}
 		w := resolveWeight(e.Weight, e.ExplicitZeroWeight)
 		if math.IsNaN(w) || math.IsInf(w, 0) {
 			return nil, fmt.Errorf("edge %q -> %q has a non-finite weight", e.From, e.To)
@@ -307,8 +328,28 @@ func sortPairs(s []edgePair) {
 	})
 }
 
-// quote renders a caller-supplied id for inclusion in an error message.
-func quote(s string) string { return strconv.Quote(s) }
+// quote renders a caller-supplied id for inclusion in an error message. The
+// value is truncated first: strconv.Quote expands binary bytes up to fourfold,
+// so echoing an unbounded caller string back would amplify the response.
+func quote(s string) string {
+	const maxEchoBytes = 64
+	if len(s) > maxEchoBytes {
+		return strconv.Quote(s[:maxEchoBytes]) + "... (truncated)"
+	}
+	return strconv.Quote(s)
+}
+
+// indexControlChar returns the index of the first C0 control character in s, or
+// -1. Control characters in an id are almost always a caller bug and would be
+// carried silently into every emitted graph, so they are rejected.
+func indexControlChar(s string) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			return i
+		}
+	}
+	return -1
+}
 
 // shortestFrom runs the single-source shortest-path algorithm appropriate for
 // the graph's weights: Dijkstra when every weight is non-negative, Bellman-Ford
@@ -319,6 +360,15 @@ func (b *built) shortestFrom(from int64) (path.Shortest, string) {
 	src := simple.Node(from)
 	if !b.hasNeg {
 		return path.DijkstraFrom(src, g), ""
+	}
+	// Bellman-Ford's negative-cycle detection loops until it exceeds
+	// V*(V-1) relaxations, so its cost is quadratic in the VERTEX count and
+	// independent of the edge count. The global 20000-vertex cap is sized for
+	// Dijkstra and does not bound it, so the negative-weight path needs its own.
+	if len(b.ids) > maxNegativeWeightNodes {
+		return path.Shortest{}, fmt.Sprintf(
+			"graphs with negative edge weights use Bellman-Ford, which is limited to %d nodes; graph has %d",
+			maxNegativeWeightNodes, len(b.ids))
 	}
 	sp, ok := path.BellmanFordFrom(src, g)
 	if !ok {
@@ -402,4 +452,8 @@ func (b *built) transposedWeightedGraph() graph.Graph {
 		})
 	}
 	return orderedWD{t}
+}
+
+func errSelectionIDTooLong(limit int) error {
+	return fmt.Errorf("a selected node id exceeds the limit of %d bytes", limit)
 }

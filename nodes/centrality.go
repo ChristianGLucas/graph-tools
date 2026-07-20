@@ -5,6 +5,7 @@ import (
 	"math"
 	"sort"
 
+	"gonum.org/v1/gonum/graph"
 	"gonum.org/v1/gonum/graph/network"
 	"gonum.org/v1/gonum/graph/path"
 
@@ -79,42 +80,13 @@ func Centrality(ctx context.Context, ax axiom.Context, input *gen.CentralityRequ
 		}
 		g := b.weightedGraph()
 
-		switch measure {
-		case "betweenness":
-			// Always the unweighted Brandes algorithm, never the weighted form.
-			// gonum's BetweennessWeighted enumerates EVERY shortest path via
-			// AllShortest, which is exponential when shortest paths tie — a
-			// 600-vertex graph with uniform weights does not finish in 45s and
-			// allocates gigabytes, and no size cap can bound that safely.
-			// Brandes is O(V*E) with no path enumeration: the same graph takes
-			// 351ms. The cost is that betweenness reflects hop-count topology
-			// rather than edge weights, which the docs state explicitly.
-			raw := network.Betweenness(g)
-			scores = make(map[int64]float64, len(raw))
-			for k, v := range raw {
-				// gonum accumulates over ORDERED pairs, so an undirected graph
-				// comes out at twice the conventional (Brandes / networkx /
-				// textbook) unnormalised value. Halve it so a caller
-				// cross-checking against a standard tool gets the same number.
-				if !b.directed {
-					v /= 2
-				}
-				scores[k] = v
-			}
-		case "closeness":
-			scores = network.Closeness(g, path.DijkstraAllPaths(g))
-		case "harmonic":
-			scores = network.Harmonic(g, path.DijkstraAllPaths(g))
-		case "eccentricity":
-			// gonum's Eccentricity uses INCOMING paths, i.e. max over u of
-			// d(u,v). The documented and conventional meaning is the outgoing
-			// one — how far this vertex can reach — so it is computed on the
-			// TRANSPOSED graph, which turns every incoming path into an
-			// outgoing one. For an undirected graph the transpose is the graph
-			// itself, so this is a no-op there.
-			tg := b.transposedWeightedGraph()
-			scores = network.Eccentricity(tg, path.DijkstraAllPaths(tg))
+		computed, budgetErr := runBounded(ctx, measure+" centrality", func() map[int64]float64 {
+			return computeAllPairs(measure, g, b)
+		})
+		if budgetErr != nil {
+			return &gen.CentralityResult{Error: budgetErr.Error()}, nil
 		}
+		scores = computed
 
 	default:
 		return &gen.CentralityResult{Error: "unknown measure " + quote(input.Measure) +
@@ -138,4 +110,46 @@ func Centrality(ctx context.Context, ax axiom.Context, input *gen.CentralityRequ
 	}
 	sort.Slice(out.Scores, func(i, j int) bool { return out.Scores[i].Node < out.Scores[j].Node })
 	return out, nil
+}
+
+// computeAllPairs runs the requested all-pairs measure. It is split out so the
+// whole computation can be driven under a single wall-clock budget.
+func computeAllPairs(measure string, g graph.Graph, b *built) map[int64]float64 {
+	switch measure {
+	case "betweenness":
+		// Always the unweighted Brandes algorithm, never the weighted form.
+		// gonum's BetweennessWeighted enumerates EVERY shortest path via
+		// AllShortest, which is exponential when shortest paths tie — a
+		// 600-vertex graph with uniform weights does not finish in 45s and
+		// allocates gigabytes, and no size cap can bound that safely. Brandes
+		// is O(V*E) with no path enumeration: the same graph takes 351ms. The
+		// cost is that betweenness reflects hop-count topology rather than edge
+		// weights, which the docs state explicitly.
+		raw := network.Betweenness(g)
+		out := make(map[int64]float64, len(raw))
+		for k, v := range raw {
+			// gonum accumulates over ORDERED pairs, so an undirected graph
+			// comes out at twice the conventional (Brandes / networkx /
+			// textbook) unnormalised value. Halve it so a caller
+			// cross-checking against a standard tool gets the same number.
+			if !b.directed {
+				v /= 2
+			}
+			out[k] = v
+		}
+		return out
+	case "closeness":
+		return network.Closeness(g, path.DijkstraAllPaths(g))
+	case "harmonic":
+		return network.Harmonic(g, path.DijkstraAllPaths(g))
+	case "eccentricity":
+		// gonum's Eccentricity uses INCOMING paths, i.e. max over u of d(u,v).
+		// The documented and conventional meaning is the outgoing one — how far
+		// this vertex can reach — so it is computed on the TRANSPOSED graph,
+		// which turns every incoming path into an outgoing one. For an
+		// undirected graph the transpose is the graph itself, a no-op.
+		tg := b.transposedWeightedGraph()
+		return network.Eccentricity(tg, path.DijkstraAllPaths(tg))
+	}
+	return nil
 }

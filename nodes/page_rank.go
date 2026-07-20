@@ -64,16 +64,28 @@ func PageRank(ctx context.Context, ax axiom.Context, input *gen.PageRankRequest)
 
 	// The tolerance is pinned rather than caller-supplied: gonum seeds the
 	// power iteration with a random vector, so the converged result varies
-	// within the tolerance. Converging to 1e-14 and then rounding to 6 decimal
-	// places puts the rounding granularity far above the residual noise, so the
-	// emitted scores are reproducible.
-	const pageRankTolerance = 1e-14
+	// within the tolerance. Rounding to 6 decimal places afterwards puts the
+	// rounding granularity far above the residual noise, so the emitted scores
+	// are reproducible.
+	//
+	// 1e-12, not 1e-14: gonum's loop has no iteration cap, and on a PERIODIC
+	// graph (a directed ring, say) the residual oscillates and plateaus above
+	// 1e-14, so the loop never exits — a ten-vertex ring at damping 0.999 spins
+	// forever. At 1e-12 the same graph converges in 2ms, and 1e-12 is still six
+	// orders of magnitude finer than the 6-decimal rounding.
+	const pageRankTolerance = 1e-12
 	const pageRankDecimals = 6
 
 	// PageRankSparse, NOT PageRank: the dense variant allocates a V*V float64
 	// matrix, which at the vertex limit is over 3 GB and OOM-kills the process.
 	// The sparse variant is O(V+E) and returns the same answer.
-	scores := network.PageRankSparse(b.pageRankView(input.Graph), damping, pageRankTolerance)
+	view := b.pageRankView(input.Graph)
+	scores, err := runBounded(ctx, "PageRank", func() map[int64]float64 {
+		return network.PageRankSparse(view, damping, pageRankTolerance)
+	})
+	if err != nil {
+		return &gen.PageRankResult{Error: err.Error()}, nil
+	}
 
 	out := &gen.PageRankResult{Damping: damping}
 	for _, id := range b.ids {

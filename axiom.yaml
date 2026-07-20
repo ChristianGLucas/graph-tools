@@ -1,5 +1,5 @@
 name: christiangeorgelucas/graph-tools
-version: 0.3.0
+version: 0.4.0
 language: go
 description: Composable graph-algorithm nodes — shortest path, distances, topological sort, connected components, minimum spanning tree, centrality, PageRank, cycle detection, structural stats and induced subgraphs — over a single canonical Graph envelope, wrapping the BSD-3-Clause gonum/graph library. Every node is stateless, deterministic for a given input, and rejects malformed graphs with a structured error rather than guessing.
 license: MIT
@@ -17,11 +17,11 @@ nodes:
     - name: ShortestPath
       input: ShortestPathRequest
       output: ShortestPathResult
-      description: Finds the cheapest route between two vertices and returns the ordered vertex ids, the total weight and the hop count. Uses Dijkstra's algorithm, switching automatically to Bellman-Ford when the graph has negative edge weights, and reports a reachable negative-weight cycle as a structured error instead of returning nonsense. Returns found=false when no path exists; check the error field first, since found is also false for a rejected request.
+      description: Finds the cheapest route between two vertices and returns the ordered vertex ids, the total weight and the hop count. Uses Dijkstra's algorithm, switching automatically to Bellman-Ford when the graph has negative edge weights, and reports a reachable negative-weight cycle as a structured error instead of returning nonsense. Graphs with negative weights are limited to 2000 vertices, since Bellman-Ford's negative-cycle detection is quadratic in the vertex count. Returns found=false when no path exists; check the error field first, since found is also false for a rejected request.
     - name: Distances
       input: DistancesRequest
       output: DistancesResult
-      description: Computes the shortest-path cost and hop count from one source vertex to every vertex it can reach, and separately lists the vertices it cannot. The single-source companion to ShortestPath, for when you need the whole reachability picture rather than one route. Uses the same Dijkstra/Bellman-Ford selection and the same negative-cycle error contract.
+      description: Computes the shortest-path cost and hop count from one source vertex to every vertex it can reach, and separately lists the vertices it cannot. The single-source companion to ShortestPath, for when you need the whole reachability picture rather than one route. Uses the same Dijkstra/Bellman-Ford selection and the same negative-cycle error contract. Graphs with negative weights use Bellman-Ford and are limited to 2000 vertices, since its negative-cycle detection is quadratic in the vertex count.
     - name: TopologicalSort
       input: Graph
       output: TopoSortResult

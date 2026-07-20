@@ -87,11 +87,14 @@ places. The same input always produces the same output — asserted by re-invoki
 each node up to 200 times. Because of that rounding, PageRank scores sum to 1
 only up to about `1e-6`.
 
-**Malformed input is rejected, never guessed.** Empty, over-long or duplicate
-vertex ids; edges pointing at vertices that do not exist; duplicate edges;
-non-finite weights; a non-finite PageRank damping factor; and edge weights whose
-magnitudes sum past float64 range all return a structured error rather than a
-crash or a silently wrong answer.
+**Malformed input is rejected, never guessed.** Empty, over-long, duplicate or
+control-character-bearing vertex ids; edges pointing at vertices that do not
+exist; duplicate edges; non-finite weights; a weight of negative zero (use
+`explicit_zero_weight` if you mean it); a non-finite or out-of-range PageRank
+damping factor; and edge weights whose magnitudes sum past float64 range all
+return a structured error rather than a crash or a silently wrong answer. Caller
+strings echoed back in an error are truncated, so an error response can never
+amplify the request.
 
 **Bounded work.** Limits are checked against the raw input before anything is
 allocated: 20 000 vertices, 200 000 edges, 3 MiB encoded, 256-byte ids and
@@ -99,8 +102,17 @@ allocated: 20 000 vertices, 200 000 edges, 3 MiB encoded, 256-byte ids and
 600 vertices **and** a 1 200 000 vertex×edge product — bounding vertices alone
 is not a cost bound, since a dense 600-vertex graph passes a vertex cap while
 costing over a minute of CPU. PageRank's damping factor is capped at 0.99 for
-the same reason: the iteration count grows without limit as damping approaches
-1, and a ten-vertex graph at 0.9999999999 never converges at all.
+the same reason. And a graph carrying any negative weight is capped at 2000
+vertices, because that switches the search to Bellman-Ford, whose
+negative-cycle detection is quadratic in the vertex count and *independent of
+the edge count* — so the 20 000-vertex and 200 000-edge caps did not bound it
+at all.
+
+Every node additionally runs its algorithm under a 20-second wall-clock budget
+and returns a structured error if it is exceeded, so a bound that turns out to
+be mis-calibrated for some input shape degrades into an error rather than a
+hang. A cancelled request returns promptly rather than waiting for the
+underlying library call, which takes no context and cannot be interrupted.
 
 **Centrality conventions.** `eccentricity` is *outgoing* (how far a vertex can
 reach). `closeness` and `harmonic` are *incoming* (summed distance from every

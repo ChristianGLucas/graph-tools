@@ -30,6 +30,12 @@ func Subgraph(ctx context.Context, ax axiom.Context, input *gen.SubgraphRequest)
 
 	keep := make(map[string]bool, len(input.Nodes))
 	for _, id := range input.Nodes {
+		// The selection list is caller-controlled and separate from the graph,
+		// so it needs its own per-entry length bound: the ids are echoed back
+		// in the error below.
+		if len(id) > maxIDBytes {
+			return nil, errSelectionIDTooLong(maxIDBytes)
+		}
 		if _, ok := b.idOf[id]; !ok {
 			return nil, errUnknownNode(id)
 		}
