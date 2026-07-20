@@ -46,14 +46,14 @@ set `explicit_zero_weight`, which is how you express a genuine zero-cost edge.
 | `DetectCycle` | `Graph` → `CycleResult` | Whether a cycle exists, how many are independent, and one concrete example. |
 | `Describe` | `Graph` → `GraphStats` | Counts, density, mean degree, self-loops, total weight, connectivity, components, is-DAG. |
 | `Subgraph` | `SubgraphRequest` → **`Graph`** | The subgraph induced by a set of vertices. |
-| `Orient` | `OrientRequest` → **`Graph`** | Reinterprets edge direction — the bridge across the directed/undirected split. |
+| `Orient` | **`Graph`** → **`Graph`** | Flips edge direction (directed ⇄ undirected) — the bridge across the directed/undirected split. |
 
 ## Composing these nodes in a flow
 
-`MinimumSpanningTree` and `Subgraph` return a **top-level `Graph`**, and
-`TopologicalSort`, `ConnectedComponents`, `DetectCycle`, `Describe` and
-`MinimumSpanningTree` itself take a top-level `Graph`. Those pairings connect
-with an **identity edge and no adapter** — for example
+`MinimumSpanningTree`, `Subgraph` and `Orient` return a **top-level `Graph`**,
+and `TopologicalSort`, `ConnectedComponents`, `DetectCycle`, `Describe`,
+`MinimumSpanningTree` and `Orient` take a top-level `Graph`. Those pairings
+connect with an **identity edge and no adapter** — for example
 `Subgraph → MinimumSpanningTree → Describe`.
 
 This shape is deliberate. A nested protobuf message field cannot currently be
@@ -67,23 +67,32 @@ The nodes that take a request wrapper (`ShortestPath`, `Distances`,
 graph — a source vertex, a measure, a vertex set — so in a flow their graph comes
 from flow input or config rather than from an upstream edge. Concretely, the
 pairs that compose with no adapter are
-`{MinimumSpanningTree, Subgraph} → {Describe, DetectCycle, ConnectedComponents, TopologicalSort, MinimumSpanningTree}`,
-minus `MinimumSpanningTree → TopologicalSort`, since a spanning tree is always
-undirected and `TopologicalSort` requires a directed graph.
+`{MinimumSpanningTree, Subgraph, Orient} → {Describe, DetectCycle, ConnectedComponents, TopologicalSort, MinimumSpanningTree, Orient}`,
+subject only to each destination's direction requirement — which is exactly what
+`Orient` exists to satisfy.
 
 **Crossing the directed/undirected split.** `MinimumSpanningTree` requires an
 undirected graph and `TopologicalSort` requires a directed one, so `Orient`
-exists to convert between them mid-flow: `Orient → MinimumSpanningTree` lets a
-directed dependency graph reach a spanning tree without leaving the flow.
-Converting to undirected collapses opposing edge pairs, keeping the smaller
-weight; converting to directed replaces each undirected edge with an opposing
-pair, which preserves reachability but makes the result cyclic by construction.
+exists to convert between them mid-flow. `Orient` takes and returns the bare
+`Graph` envelope and reads the direction to flip from the graph's own `directed`
+field, so it needs no configuration and genuinely composes on a flow edge:
+`Orient → MinimumSpanningTree` lets a directed dependency graph reach a spanning
+tree without leaving the flow, and `MinimumSpanningTree → Orient →
+TopologicalSort` takes the tree back to a directed graph.
 
-**Two different failure modes.** The eight nodes with a result message report a
+A directed graph in yields an undirected graph out, and vice versa. Converting
+to undirected collapses opposing edge pairs, keeping the smaller weight;
+converting to directed replaces each undirected edge with an opposing pair,
+which preserves reachability but makes the result cyclic by construction — and
+is rejected when the doubled edge count would exceed the 200 000-edge limit,
+rather than emitting a graph the sibling nodes would refuse.
+
+**Two different failure modes.** The seven nodes with a result message report a
 rejected request *in band*, as a structured `error` string with an HTTP 200 — so
 in a flow the step reports success and you must check `error` yourself. The two
-graph-producing nodes return a bare `Graph`, which has no `error` field, so they
-fail *out of band* and abort the flow instead. Check `error` first on the former;
+graph-producing nodes (`MinimumSpanningTree`, `Subgraph`, `Orient`) return a
+bare `Graph`, which has no `error` field, so they fail *out of band* and abort
+the flow instead. Check `error` first on the former;
 expect an aborted run from the latter.
 
 ## Behaviour worth knowing
@@ -130,6 +139,8 @@ input silently selects a far more expensive algorithm:
   and is capped at 2000 vertices **and** the same 1 200 000 product. gonum's
   Bellman-Ford-Moore costs O(V·E), so the edge count is the dominant term, not
   an irrelevant one.
+- `Orient` converting undirected → directed doubles the edge count, so it
+  rejects an input whose doubled output would exceed the 200 000-edge limit.
 
 PageRank's damping factor is capped at 0.99 for the same family of reason: the
 iteration count grows without limit as damping approaches 1.
@@ -146,12 +157,24 @@ alone; every node measures well under a second at the largest admissible
 payload, including on large-diameter graphs where a naive hop-count
 reconstruction would go quadratic.
 
-**Errors inside a flow.** The eight nodes with a result message report a
+**Errors inside a flow.** The seven nodes with a result message report a
 rejected request in band, with an HTTP 200 — so a flow step reports success and
-you must check `error` yourself. The two graph-producing nodes return a bare
-`Graph`, which has no `error` field, so they fail out of band and abort the run;
+you must check `error` yourself. The three graph-producing nodes
+(`MinimumSpanningTree`, `Subgraph`, `Orient`) return a bare `Graph`, which has no `error` field, so they fail out of band and abort the run;
 the flow reports `graph produced no terminal result` without naming the cause,
 so invoke the node directly to see the real message.
+
+**Negative weights and negative cycles.** `ShortestPath` and `Distances` accept
+negative edge weights, switching from Dijkstra to Bellman-Ford to do so. When a
+negative-weight cycle is *reachable from the source*, shortest paths are
+undefined, and both nodes say so in `error` rather than returning a finite
+number. That includes a negative-weight **self-loop**: an edge from a vertex to
+itself with a negative weight is a cycle you can go round forever, so if the
+source can reach that vertex the answer is `-∞` and the request is rejected. A
+negative self-loop on a vertex the source *cannot* reach leaves the answer
+well-defined and is not an error. This matches `DetectCycle`, which also counts
+a self-loop as a cycle. (Note that in an *undirected* graph any negative edge is
+itself a negative cycle — traverse it and come straight back.)
 
 **Centrality conventions.** `eccentricity` is *outgoing* (how far a vertex can
 reach). `closeness` and `harmonic` are *incoming* (summed distance from every

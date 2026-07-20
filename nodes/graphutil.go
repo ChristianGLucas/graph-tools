@@ -96,8 +96,16 @@ type built struct {
 	// selfLoopOf counts self-loops per vertex, so the degree measures can apply
 	// the standard "a self-loop adds 2 to a vertex's degree" convention even
 	// though self-loops are held outside the gonum structures.
-	selfLoopOf  map[string]int
-	totalWeight float64 // sum of every resolved edge weight
+	selfLoopOf map[string]int
+	// negSelfLoops lists the gonum ids of vertices carrying a NEGATIVE-weight
+	// self-loop. Self-loops are held outside the gonum structures, so
+	// Bellman-Ford cannot see them — but a negative self-loop on a vertex the
+	// source can reach IS a reachable negative cycle (traverse it repeatedly and
+	// the cost falls without bound), and shortest paths are then undefined.
+	// shortestFrom checks this list explicitly; without it the search returns a
+	// confidently wrong FINITE answer. Sorted ascending for determinism.
+	negSelfLoops []int64
+	totalWeight  float64 // sum of every resolved edge weight
 	edgeCount   int     // total edges in the input, including self-loops
 	hasNeg      bool    // true when any resolved edge weight is negative
 	weighted    bool    // true when any resolved edge weight differs from 1
@@ -252,10 +260,6 @@ func buildGraph(g *graphInput) (*built, error) {
 		if w != 1 {
 			b.weighted = true
 		}
-		if w == 0 {
-			b.hasZero = true
-		}
-
 		key := pair{fromID, toID}
 		if !g.Directed && toID < fromID {
 			key = pair{toID, fromID}
@@ -272,7 +276,16 @@ func buildGraph(g *graphInput) (*built, error) {
 			// centrality, so they are excluded from the gonum structures.
 			b.selfLoops++
 			b.selfLoopOf[e.From]++
+			if w < 0 {
+				b.negSelfLoops = append(b.negSelfLoops, fromID)
+			}
+			// NOTE: hasZero deliberately excludes self-loops. It guards the
+			// closeness/harmonic rejection of zero-distance vertex PAIRS, and a
+			// self-loop cannot put a DISTINCT vertex at distance 0.
 			continue
+		}
+		if w == 0 {
+			b.hasZero = true
 		}
 
 		fn, tn := simple.Node(fromID), simple.Node(toID)
@@ -405,10 +418,26 @@ func (b *built) shortestFrom(ctx context.Context, from int64) (path.Shortest, st
 		return path.Shortest{}, budgetErr.Error()
 	}
 	if !res.ok {
-		return res.sp, "graph contains a negative-weight cycle reachable from the source; shortest paths are undefined"
+		return res.sp, negCycleMsg
+	}
+	// Self-loops live outside the gonum structures, so Bellman-Ford above could
+	// not have seen one. A NEGATIVE self-loop on a vertex the source can reach is
+	// nonetheless a reachable negative cycle — going round it repeatedly drives
+	// the cost to -Inf — so shortest paths are undefined and every distance the
+	// search just computed is meaningless. Report it exactly as gonum's own
+	// detection is reported. Reachability is read straight off the completed
+	// search: a finite weight means reachable.
+	for _, v := range b.negSelfLoops {
+		if w := res.sp.WeightTo(v); !math.IsInf(w, 1) {
+			return path.Shortest{}, negCycleMsg
+		}
 	}
 	return res.sp, ""
 }
+
+// negCycleMsg is the single negative-cycle error contract, shared by gonum's
+// detection and this package's self-loop detection so a caller sees one message.
+const negCycleMsg = "graph contains a negative-weight cycle reachable from the source; shortest paths are undefined"
 
 // requireQuadraticBudget guards the all-pairs measures on BOTH dimensions that
 // drive their cost. The vertex cap alone is not a cost bound, because time is

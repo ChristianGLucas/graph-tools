@@ -2,36 +2,41 @@ package nodes
 
 import (
 	"context"
+	"fmt"
 	"sort"
 
 	"christiangeorgelucas/graph-tools/axiom"
 	gen "christiangeorgelucas/graph-tools/gen"
 )
 
-// Reinterprets a graph's edge direction, returning a plain Graph so it chains
-// with no adapter. This is the bridge across the package's directed/undirected
-// split: MinimumSpanningTree requires an undirected graph and TopologicalSort
-// requires a directed one, so without this node a directed graph could never
-// reach the former and an undirected graph could never reach the latter inside
-// a flow.
+// Flips a graph's edge direction — a directed graph in yields an undirected
+// graph out, and vice versa. It takes and returns the plain Graph envelope, so
+// it chains from and into every other Graph-shaped node with no adapter.
 //
-// Converting to UNDIRECTED collapses any pair of opposing edges into a single
-// edge carrying the smaller of the two weights — a directed a->b of 5 and
-// b->a of 2 become one a-b of 2 — because an undirected graph cannot hold both
-// and silently keeping an arbitrary one would be a guess.
+// This is the bridge across the package's directed/undirected split:
+// MinimumSpanningTree requires an undirected graph and TopologicalSort requires
+// a directed one, so without this node a directed graph could never reach the
+// former and an undirected graph could never reach the latter inside a flow.
+// Because the direction is read from the input graph's own `directed` field
+// rather than from a separate parameter, the node needs no configuration and
+// composes mid-flow.
 //
-// Converting to DIRECTED replaces each undirected edge with a pair of opposing
+// Directed -> UNDIRECTED collapses any pair of opposing edges into a single
+// edge carrying the smaller of the two weights — a directed a->b of 5 and b->a
+// of 2 become one a-b of 2 — because an undirected graph cannot hold both and
+// silently keeping an arbitrary one would be a guess.
+//
+// Undirected -> DIRECTED replaces each undirected edge with a pair of opposing
 // edges, which preserves reachability exactly. Note that this makes the result
 // cyclic by construction, so a topological sort of it will report is_dag=false
-// unless the original had no edges.
+// unless the original had no edges. Because this doubles the edge count, the
+// node rejects an input whose DOUBLED edge count would exceed the same edge
+// limit every other node in the package enforces, rather than emitting a graph
+// its own siblings would refuse.
 //
-// A graph that already has the requested direction is returned unchanged.
 // Self-loops and vertex labels are preserved in every case.
-func Orient(ctx context.Context, ax axiom.Context, input *gen.OrientRequest) (*gen.Graph, error) {
-	if input == nil {
-		return nil, errRequestRequired()
-	}
-	b, err := buildGraph(input.Graph)
+func Orient(ctx context.Context, ax axiom.Context, input *gen.Graph) (*gen.Graph, error) {
+	b, err := buildGraph(input)
 	if err != nil {
 		return nil, err
 	}
@@ -39,23 +44,27 @@ func Orient(ctx context.Context, ax axiom.Context, input *gen.OrientRequest) (*g
 		return nil, err
 	}
 
-	out := &gen.Graph{Directed: input.Directed}
+	// The output direction is the opposite of the input's.
+	out := &gen.Graph{Directed: !b.directed}
 	for _, id := range b.ids {
 		out.Nodes = append(out.Nodes, &gen.GraphNode{Id: id, Label: b.labelOf[id]})
 	}
 
-	// Unchanged direction: copy the edges through verbatim.
-	if b.directed == input.Directed {
-		for _, e := range input.Graph.Edges {
-			out.Edges = append(out.Edges, cloneEdge(e))
-		}
-		return out, nil
-	}
-
-	if input.Directed {
+	if out.Directed {
 		// Undirected -> directed: each edge becomes an opposing pair. A
 		// self-loop is already its own reverse, so it is emitted once.
-		for _, e := range input.Graph.Edges {
+		//
+		// Bound the OUTPUT, not just the input: a graph at the input edge limit
+		// would otherwise emit one at twice the limit, which every downstream
+		// node in this package rejects and which the transport eventually fails
+		// opaquely. Checked before any edge is appended.
+		projected := 2*b.edgeCount - b.selfLoops
+		if projected > maxEdges {
+			return nil, fmt.Errorf(
+				"converting to directed doubles the edge count, producing %d edges and exceeding the limit of %d; the input has %d edges",
+				projected, maxEdges, b.edgeCount)
+		}
+		for _, e := range input.Edges {
 			out.Edges = append(out.Edges, cloneEdge(e))
 			if e.From != e.To {
 				rev := cloneEdge(e)
@@ -72,7 +81,7 @@ func Orient(ctx context.Context, ax axiom.Context, input *gen.OrientRequest) (*g
 	type key struct{ a, b string }
 	best := map[key]*gen.GraphEdge{}
 	var order []key
-	for _, e := range input.Graph.Edges {
+	for _, e := range input.Edges {
 		k := key{e.From, e.To}
 		if e.To < e.From {
 			k = key{e.To, e.From}

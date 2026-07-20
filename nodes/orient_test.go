@@ -2,6 +2,8 @@ package nodes_test
 
 import (
 	"context"
+	"strconv"
+	"strings"
 	"testing"
 
 	gen "christiangeorgelucas/graph-tools/gen"
@@ -15,7 +17,7 @@ func TestOrientToUndirectedCollapsesOpposingEdges(t *testing.T) {
 	g := mkGraph(true, []string{"a", "b", "c"}, [][3]any{
 		{"a", "b", 5}, {"b", "a", 2}, {"b", "c", 7},
 	})
-	got, err := nodes.Orient(ctx, ax, &gen.OrientRequest{Graph: g, Directed: false})
+	got, err := nodes.Orient(ctx, ax, g)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -39,7 +41,7 @@ func TestOrientToUndirectedCollapsesOpposingEdges(t *testing.T) {
 func TestOrientToDirectedDuplicatesEachEdge(t *testing.T) {
 	ctx, ax := context.Background(), newTestContext(t)
 	g := mkGraph(false, []string{"a", "b", "c"}, [][3]any{{"a", "b", 3}, {"b", "c", 4}})
-	got, err := nodes.Orient(ctx, ax, &gen.OrientRequest{Graph: g, Directed: true})
+	got, err := nodes.Orient(ctx, ax, g)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -66,6 +68,33 @@ func TestOrientToDirectedDuplicatesEachEdge(t *testing.T) {
 	}
 }
 
+// Orient reads its direction from the graph's own `directed` field, so its
+// input is the bare Graph envelope. That is what lets it receive a Graph from
+// an upstream flow edge; a request wrapper could not. This test pins the
+// signature by feeding it another node's Graph output directly, with no
+// wrapper construction anywhere.
+func TestOrientConsumesAnUpstreamGraphDirectly(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	src := mkGraph(false, []string{"a", "b", "c", "d"}, [][3]any{
+		{"a", "b", 1}, {"b", "c", 2}, {"c", "d", 3}, {"a", "d", 9},
+	})
+	// Subgraph -> Orient -> TopologicalSort, every hop a bare Graph.
+	sub, err := nodes.Subgraph(ctx, ax, &gen.SubgraphRequest{Graph: src, Nodes: []string{"a", "b", "c"}})
+	if err != nil {
+		t.Fatalf("Subgraph: %v", err)
+	}
+	dir, err := nodes.Orient(ctx, ax, sub) // <- the upstream Graph, unwrapped
+	if err != nil {
+		t.Fatalf("Orient: %v", err)
+	}
+	if !dir.Directed {
+		t.Fatalf("Orient must flip the undirected subgraph to directed")
+	}
+	if ts, err := nodes.TopologicalSort(ctx, ax, dir); err != nil || ts.Error != "" {
+		t.Fatalf("TopologicalSort on the reoriented subgraph: err=%v nodeErr=%s", err, ts.Error)
+	}
+}
+
 // The whole point of the node: it makes the previously-unreachable pairings work.
 func TestOrientUnlocksTheDirectedUndirectedSplit(t *testing.T) {
 	ctx, ax := context.Background(), newTestContext(t)
@@ -77,7 +106,7 @@ func TestOrientUnlocksTheDirectedUndirectedSplit(t *testing.T) {
 	if _, err := nodes.MinimumSpanningTree(ctx, ax, directed); err == nil {
 		t.Fatalf("precondition: MST must reject a directed graph")
 	}
-	und, err := nodes.Orient(ctx, ax, &gen.OrientRequest{Graph: directed, Directed: false})
+	und, err := nodes.Orient(ctx, ax, directed)
 	if err != nil {
 		t.Fatalf("Orient: %v", err)
 	}
@@ -94,13 +123,23 @@ func TestOrientUnlocksTheDirectedUndirectedSplit(t *testing.T) {
 		t.Errorf("MST total_weight = %v, want 6", stats.TotalWeight)
 	}
 
+	// And the MST's own undirected output can now reach TopologicalSort — the
+	// exact recipe MinimumSpanningTree's published description promises.
+	backDir, err := nodes.Orient(ctx, ax, mst)
+	if err != nil {
+		t.Fatalf("Orient(mst): %v", err)
+	}
+	if ts, err := nodes.TopologicalSort(ctx, ax, backDir); err != nil || ts.Error != "" {
+		t.Fatalf("TopologicalSort on the reoriented MST: err=%v nodeErr=%s", err, ts.Error)
+	}
+
 	// An UNDIRECTED graph can now reach TopologicalSort (it will be cyclic by
 	// construction, which the node documents).
 	undirected := mkGraph(false, []string{"x", "y"}, [][3]any{{"x", "y", 1}})
 	if r, err := nodes.TopologicalSort(ctx, ax, undirected); err != nil || r.Error == "" {
 		t.Fatalf("precondition: TopologicalSort must reject undirected input")
 	}
-	dir, err := nodes.Orient(ctx, ax, &gen.OrientRequest{Graph: undirected, Directed: true})
+	dir, err := nodes.Orient(ctx, ax, undirected)
 	if err != nil {
 		t.Fatalf("Orient: %v", err)
 	}
@@ -123,7 +162,7 @@ func TestOrientPreservesLabelsSelfLoopsAndZeroWeights(t *testing.T) {
 			{From: "a", To: "b", Weight: 0, ExplicitZeroWeight: true},
 		},
 	}
-	got, err := nodes.Orient(ctx, ax, &gen.OrientRequest{Graph: g, Directed: false})
+	got, err := nodes.Orient(ctx, ax, g)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -147,18 +186,75 @@ func TestOrientPreservesLabelsSelfLoopsAndZeroWeights(t *testing.T) {
 	}
 }
 
-func TestOrientIsIdentityWhenDirectionAlreadyMatches(t *testing.T) {
+// Orienting a directed graph that holds no opposing pairs to undirected and
+// back must return the original edge set, doubled in the documented way.
+func TestOrientRoundTrip(t *testing.T) {
 	ctx, ax := context.Background(), newTestContext(t)
-	for _, directed := range []bool{true, false} {
-		g := mkGraph(directed, []string{"a", "b"}, [][3]any{{"a", "b", 2}})
-		got, err := nodes.Orient(ctx, ax, &gen.OrientRequest{Graph: g, Directed: directed})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+	g := mkGraph(false, []string{"a", "b", "c"}, [][3]any{{"a", "b", 2}, {"b", "c", 5}})
+	dir, err := nodes.Orient(ctx, ax, g)
+	if err != nil {
+		t.Fatalf("Orient: %v", err)
+	}
+	back, err := nodes.Orient(ctx, ax, dir)
+	if err != nil {
+		t.Fatalf("Orient back: %v", err)
+	}
+	if back.Directed {
+		t.Fatalf("round trip must land back on undirected")
+	}
+	if len(back.Edges) != 2 {
+		t.Fatalf("round trip changed the edge set: %+v", back.Edges)
+	}
+	for _, e := range back.Edges {
+		if e.From == "a" && e.To == "b" && e.Weight != 2 {
+			t.Errorf("a-b weight = %v, want 2", e.Weight)
 		}
-		if got.Directed != directed || len(got.Edges) != 1 || got.Edges[0].Weight != 2 {
-			t.Errorf("directed=%v: expected an unchanged graph, got %+v", directed, got)
+		if e.From == "b" && e.To == "c" && e.Weight != 5 {
+			t.Errorf("b-c weight = %v, want 5", e.Weight)
 		}
 	}
+}
+
+// Undirected -> directed doubles the edge count. The node must bound its own
+// OUTPUT, rather than emitting a graph every sibling node would reject.
+func TestOrientBoundsItsDoubledOutput(t *testing.T) {
+	ctx, ax := context.Background(), newTestContext(t)
+	// A ring lattice: 20000 vertices (the node cap exactly), each joined to its
+	// next 6 neighbours, for 120000 edges. Ids are kept short and weights
+	// omitted so the input sits comfortably under the node, edge and
+	// encoded-size limits — the ONLY thing it violates is the doubled OUTPUT
+	// (2*120000 = 240000 > 200000). Otherwise this test would pass on an
+	// unrelated bound and prove nothing.
+	const verts, span = 20000, 6
+	g := &gen.Graph{Directed: false}
+	id := func(i int) string { return strconv.FormatInt(int64(i), 36) }
+	for i := 0; i < verts; i++ {
+		g.Nodes = append(g.Nodes, &gen.GraphNode{Id: id(i)})
+	}
+	for i := 0; i < verts; i++ {
+		for d := 1; d <= span; d++ {
+			g.Edges = append(g.Edges, &gen.GraphEdge{From: id(i), To: id((i + d) % verts)})
+		}
+	}
+
+	// Precondition: the input itself is perfectly acceptable to the package.
+	if st, err := nodes.Describe(ctx, ax, g); err != nil || st.Error != "" {
+		t.Fatalf("precondition: the INPUT must be within every other bound; err=%v nodeErr=%s", err, st.Error)
+	}
+
+	got, err := nodes.Orient(ctx, ax, g)
+	if err == nil {
+		t.Fatalf("expected a rejection; got a graph with %d edges", len(got.Edges))
+	}
+	if got != nil {
+		t.Errorf("a rejected request must not also return a graph")
+	}
+	// It must be the OUTPUT-doubling bound specifically.
+	if !strings.Contains(err.Error(), "doubles the edge count") {
+		t.Fatalf("wrong bound fired — this test must exercise the output bound, not an\n"+
+			"incidental one. got: %v", err)
+	}
+	t.Logf("bounded as expected: %v", err)
 }
 
 func TestOrientDeterminism(t *testing.T) {
@@ -168,7 +264,7 @@ func TestOrientDeterminism(t *testing.T) {
 	})
 	var first []string
 	for i := 0; i < 25; i++ {
-		got, err := nodes.Orient(ctx, ax, &gen.OrientRequest{Graph: g, Directed: false})
+		got, err := nodes.Orient(ctx, ax, g)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -188,12 +284,12 @@ func TestOrientDeterminism(t *testing.T) {
 
 func TestOrientErrors(t *testing.T) {
 	ctx, ax := context.Background(), newTestContext(t)
-	for name, req := range map[string]*gen.OrientRequest{
-		"nil request": nil,
-		"nil graph":   {Directed: true},
-		"bad graph":   {Graph: &gen.Graph{Nodes: []*gen.GraphNode{{Id: "a"}, {Id: "a"}}}, Directed: true},
+	for name, g := range map[string]*gen.Graph{
+		"nil graph":    nil,
+		"duplicate id": {Nodes: []*gen.GraphNode{{Id: "a"}, {Id: "a"}}},
+		"unknown edge": {Nodes: []*gen.GraphNode{{Id: "a"}}, Edges: []*gen.GraphEdge{{From: "a", To: "zz"}}},
 	} {
-		if _, err := nodes.Orient(ctx, ax, req); err == nil {
+		if _, err := nodes.Orient(ctx, ax, g); err == nil {
 			t.Errorf("%s: expected an error", name)
 		}
 	}

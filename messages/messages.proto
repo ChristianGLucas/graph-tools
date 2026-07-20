@@ -1,10 +1,16 @@
 // Data contracts for christiangeorgelucas/graph-tools.
 //
 // The canonical envelope is `Graph`. The graph-producing nodes
-// (MinimumSpanningTree, Subgraph) return `Graph` as their TOP-LEVEL output
-// message, and the graph-consuming nodes (TopologicalSort, ConnectedComponents,
-// DetectCycle, Describe) take `Graph` as their top-level input, so those nodes
-// wire together in a flow with an identity edge and no adapter.
+// (MinimumSpanningTree, Subgraph, Orient) return `Graph` as their TOP-LEVEL
+// output message, and the graph-consuming nodes (TopologicalSort,
+// ConnectedComponents, DetectCycle, Describe, Orient) take `Graph` as their
+// top-level input, so those nodes wire together in a flow with an identity edge
+// and no adapter.
+//
+// Orient is deliberately shaped this way: it reads the direction to flip from
+// the graph's own `directed` field rather than from a request wrapper, because a
+// nested message field cannot cross a flow edge — a wrapper would have made it
+// impossible to pipe a Graph into Orient mid-flow.
 //
 // NOTE ON DOC COMMENTS: every field comment in this file is a LEADING comment
 // (on its own line, above the field). Trailing comments are discarded by the
@@ -42,6 +48,11 @@ message GraphEdge {
   // Set this to true to make a `weight` of 0 mean a genuine zero cost instead
   // of being defaulted to 1.0. Needed only for zero-cost edges.
   bool explicit_zero_weight = 4;
+  // A self-loop (`from` == `to`) is allowed. It is counted by Describe and
+  // reported as a cycle by DetectCycle, and it does not affect shortest paths,
+  // spanning trees or centrality. One exception matters: a self-loop with a
+  // NEGATIVE weight is a negative cycle, so ShortestPath and Distances reject
+  // the request whenever the source can reach that vertex.
 }
 
 // The canonical graph envelope shared by every node in this package: a set of
@@ -61,6 +72,11 @@ message Graph {
 }
 
 // A request for the single cheapest path between two vertices.
+//
+// Negative edge weights are accepted and switch the search from Dijkstra to
+// Bellman-Ford. If a negative-weight cycle is reachable from `from`, shortest
+// paths are undefined and the request is rejected via `error` — this includes a
+// negative-weight self-loop on any vertex the source can reach.
 message ShortestPathRequest {
   // The graph to search.
   Graph graph = 1;
@@ -89,6 +105,10 @@ message ShortestPathResult {
 }
 
 // A request for the shortest-path distance from one source to every vertex.
+//
+// Same weight handling and negative-cycle contract as ShortestPathRequest: a
+// reachable negative-weight cycle — including a negative self-loop — is
+// reported in `error` instead of yielding finite nonsense.
 message DistancesRequest {
   // The graph to search.
   Graph graph = 1;
@@ -311,14 +331,6 @@ message SubgraphRequest {
   repeated string nodes = 2;
 }
 
-// A request to reinterpret a graph's edge direction.
-message OrientRequest {
-  // The graph to reorient.
-  Graph graph = 1;
-  // True to produce a DIRECTED graph, false to produce an UNDIRECTED one.
-  // Converting to directed replaces each undirected edge with a pair of
-  // opposing edges; converting to undirected collapses any pair of opposing
-  // edges into one, keeping the smaller weight. A graph that already has the
-  // requested direction is returned unchanged.
-  bool directed = 2;
-}
+// Orient takes and returns the top-level Graph envelope directly — it reads the
+// direction to flip from the graph's own `directed` field, so it needs no
+// request wrapper and can receive a Graph straight from an upstream flow edge.

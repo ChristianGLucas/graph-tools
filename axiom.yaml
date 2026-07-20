@@ -1,5 +1,5 @@
 name: christiangeorgelucas/graph-tools
-version: 0.8.0
+version: 0.9.0
 language: go
 description: Composable graph-algorithm nodes — shortest path, distances, topological sort, connected components, minimum spanning tree, centrality, PageRank, cycle detection, structural stats and induced subgraphs — over a single canonical Graph envelope, wrapping the BSD-3-Clause gonum/graph library. Every node is stateless, deterministic for a given input, and rejects malformed graphs with a structured error rather than guessing.
 author: Christian George Lucas
@@ -15,11 +15,11 @@ tags:
     - network-analysis
 nodes:
     - name: ShortestPath
-      description: Finds the cheapest route between two vertices and returns the ordered vertex ids, the total weight and the hop count. Uses Dijkstra's algorithm, switching automatically to Bellman-Ford when the graph has negative edge weights, and reports a reachable negative-weight cycle as a structured error instead of returning nonsense. Graphs with negative weights are limited to 2000 vertices and a 1200000 vertex-edge product, since Bellman-Ford costs O(nodes*edges). Returns found=false when no path exists; check the error field first, since found is also false for a rejected request.
+      description: Finds the cheapest route between two vertices and returns the ordered vertex ids, the total weight and the hop count. Uses Dijkstra's algorithm, switching automatically to Bellman-Ford when the graph has negative edge weights, and reports a reachable negative-weight cycle as a structured error instead of returning nonsense — including a negative-weight SELF-LOOP, which is a negative cycle whenever the source can reach it. Graphs with negative weights are limited to 2000 vertices and a 1200000 vertex-edge product, since Bellman-Ford costs O(nodes*edges). Returns found=false when no path exists; check the error field first, since found is also false for a rejected request.
       input: ShortestPathRequest
       output: ShortestPathResult
     - name: Distances
-      description: Computes the shortest-path cost and hop count from one source vertex to every vertex it can reach, and separately lists the vertices it cannot. The single-source companion to ShortestPath, for when you need the whole reachability picture rather than one route. Uses the same Dijkstra/Bellman-Ford selection and the same negative-cycle error contract. Graphs with negative weights use Bellman-Ford and are limited to 2000 vertices and a 1200000 vertex-edge product, since its cost is O(nodes*edges).
+      description: Computes the shortest-path cost and hop count from one source vertex to every vertex it can reach, and separately lists the vertices it cannot. The single-source companion to ShortestPath, for when you need the whole reachability picture rather than one route. Uses the same Dijkstra/Bellman-Ford selection and the same negative-cycle error contract, including treating a reachable negative-weight self-loop as a negative cycle. Graphs with negative weights use Bellman-Ford and are limited to 2000 vertices and a 1200000 vertex-edge product, since its cost is O(nodes*edges).
       input: DistancesRequest
       output: DistancesResult
     - name: TopologicalSort
@@ -31,7 +31,7 @@ nodes:
       input: Graph
       output: ComponentsResult
     - name: MinimumSpanningTree
-      description: Selects the cheapest set of edges that connects every vertex without forming a cycle, using Kruskal's algorithm. Returns the tree as a plain Graph, so it feeds directly into Describe, DetectCycle or ConnectedComponents with no adapter. (Not into TopologicalSort, which requires a directed graph while a spanning tree is always undirected — pipe through Orient if you need that.) A disconnected input yields a minimum spanning forest rather than an error. Requires an undirected graph; pipe the result into Describe to recover the tree's total weight.
+      description: Selects the cheapest set of edges that connects every vertex without forming a cycle, using Kruskal's algorithm. Returns the tree as a plain Graph, so it feeds directly into Describe, DetectCycle, ConnectedComponents or Orient with no adapter. (Not directly into TopologicalSort, which requires a directed graph while a spanning tree is always undirected — pipe through Orient, which also takes and returns a plain Graph, to cross that split inside a flow.) A disconnected input yields a minimum spanning forest rather than an error. Requires an undirected graph; pipe the result into Describe to recover the tree's total weight.
       input: Graph
       output: Graph
     - name: Centrality
@@ -51,10 +51,10 @@ nodes:
       input: Graph
       output: GraphStats
     - name: Orient
-      input: OrientRequest
+      input: Graph
       output: Graph
-      description: Reinterprets a graph's edge direction, returning a plain Graph so it chains with no adapter. This is the bridge across the package's directed/undirected split — MinimumSpanningTree requires an undirected graph and TopologicalSort requires a directed one, so without this node a directed graph could never reach the former nor an undirected graph the latter inside a flow. Converting to undirected collapses any pair of opposing edges into one carrying the smaller weight; converting to directed replaces each undirected edge with an opposing pair, which preserves reachability but makes the result cyclic by construction. Labels, self-loops and explicit zero weights are preserved, and a graph that already has the requested direction is returned unchanged.
+      description: Flips a graph's edge direction — a directed graph in yields an undirected graph out, and vice versa. It takes and returns the plain Graph envelope, so it chains from and into every other Graph-shaped node with no adapter and needs no configuration. This is the bridge across the package's directed/undirected split — MinimumSpanningTree requires an undirected graph and TopologicalSort requires a directed one, so without this node a directed graph could never reach the former nor an undirected graph the latter inside a flow. Directed to undirected collapses any pair of opposing edges into one carrying the smaller weight; undirected to directed replaces each undirected edge with an opposing pair, which preserves reachability but makes the result cyclic by construction, and is rejected when the doubled edge count would exceed the package's 200000-edge limit. Labels, self-loops and explicit zero weights are preserved.
     - name: Subgraph
-      description: Extracts the subgraph induced by a set of vertices, keeping exactly those vertices and every edge whose endpoints are both kept. Returns a plain Graph, so in a flow it chains with no adapter into the nodes that take a top-level Graph — Describe, DetectCycle, ConnectedComponents, TopologicalSort and MinimumSpanningTree. Centrality and the other request-wrapper nodes nest their graph inside a request message, which cannot cross a flow edge, so narrowing a graph before an all-pairs measure works when you invoke Centrality directly rather than wiring it downstream. A requested vertex id that is not in the source graph is rejected rather than silently ignored.
+      description: Extracts the subgraph induced by a set of vertices, keeping exactly those vertices and every edge whose endpoints are both kept. Returns a plain Graph, so in a flow it chains with no adapter into the nodes that take a top-level Graph — Describe, DetectCycle, ConnectedComponents, TopologicalSort, MinimumSpanningTree and Orient. Centrality and the other request-wrapper nodes nest their graph inside a request message, which cannot cross a flow edge, so narrowing a graph before an all-pairs measure works when you invoke Centrality directly rather than wiring it downstream. A requested vertex id that is not in the source graph is rejected rather than silently ignored.
       input: SubgraphRequest
       output: Graph
